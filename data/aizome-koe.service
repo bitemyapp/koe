@@ -1,0 +1,19 @@
+[Unit]
+Description=Koe voice dictation for Aizome
+PartOf=aizome-session.target
+After=aizome.service pipewire.service
+
+[Service]
+Type=exec
+ExecStart=koe daemon
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStopSec=10
+
+[Install]
+WantedBy=aizome-session.target

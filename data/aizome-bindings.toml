@@ -1,0 +1,7 @@
+# Merge these entries into ~/.config/aizome/settings.toml, then:
+# aizomectl reload-config
+[keys.bindings]
+"Super+Alt+D" = "spawn koe record toggle"
+"Super+Alt+Escape" = "spawn koe record cancel"
+"Super+Alt+P" = "spawn koe record pause"
+"Super+Alt+R" = "spawn koe record resume"

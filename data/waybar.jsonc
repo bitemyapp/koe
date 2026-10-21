@@ -1,0 +1,10 @@
+{
+  "custom/koe": {
+    "exec": "koe watch --waybar",
+    "return-type": "json",
+    "restart-interval": 2,
+    "on-click": "koe record toggle",
+    "on-click-right": "koe record cancel",
+    "tooltip": true
+  }
+}

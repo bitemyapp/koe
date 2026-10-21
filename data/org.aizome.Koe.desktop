@@ -1,0 +1,25 @@
+[Desktop Entry]
+Name=Koe Dictation
+GenericName=Voice Dictation
+Comment=Speak to type in the focused application
+Exec=koe record toggle
+Icon=org.aizome.Koe
+Type=Application
+Categories=Utility;Accessibility;
+Keywords=voice;speech;dictation;microphone;
+StartupWMClass=org.aizome.Koe
+DBusActivatable=false
+Terminal=false
+Actions=Cancel;CopyLast;ClearLast;
+
+[Desktop Action Cancel]
+Name=Cancel Dictation
+Exec=koe record cancel
+
+[Desktop Action CopyLast]
+Name=Copy Last Transcript
+Exec=koe record copy-last
+
+[Desktop Action ClearLast]
+Name=Forget Last Transcript
+Exec=koe record clear-last
