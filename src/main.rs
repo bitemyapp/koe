@@ -402,7 +402,8 @@ async fn run() -> Result<()> {
 }
 
 /// Vocabulary commands use the store directly, with the window's lock and
-/// revision checks, so scripts and agents work whether or not the daemon runs.
+/// revision checks, so scripts and agents work whether or not the daemon
+/// runs. An open vocabulary window shows their changes within seconds.
 struct Vocab {
     store: Store,
     config: Config,

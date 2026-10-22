@@ -101,8 +101,12 @@ They also verify that ordinary dictation creates no saved training audio.
 
 The native Aizome Kit harness drives the real window against an isolated daemon:
 Record → Stop → edit the complete sentence → approve a correction → Save →
-export. The model server and microphone are fixtures. To render its ordinary and
-review states for inspection, set an existing output directory:
+export. The model server and microphone are fixtures. Two more window tests
+check that six seconds of polling leave every control as it was and repaint
+nothing (each poll used to disable about half the controls until its reply,
+which flickered), and that a word added by `koe words add` appears without
+discarding an unsaved edit, which then saves on top of it. To render its
+ordinary and review states for inspection, set an existing output directory:
 
 ```sh
 KOE_TEST_SCREENSHOTS=/tmp cargo test --test daemon native_window -- --nocapture

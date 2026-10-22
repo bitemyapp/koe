@@ -270,7 +270,8 @@ Delete saved examples from the window before removing their word or pack.
 The command line does everything the window does except record, so scripts
 and agents can manage vocabulary and review training data. Every command prints
 JSON, works whether or not the daemon is running, and takes a pack's ID or name
-and a word's ID or spelling:
+and a word's ID or spelling. An open window shows their changes within three
+seconds, keeping anything you were typing:
 
 ```sh
 koe packs list                                   # the whole library

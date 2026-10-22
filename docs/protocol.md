@@ -78,7 +78,8 @@ starts a bounded recording with no paste target. Use `teach-stop` to recognize,
 then `teach-poll` to retrieve `{heard, corrected, duration_ms}`. Each command
 requires the same token. The owner must poll at least every eight seconds while
 recording, recognizing, or reviewing, or the daemon discards the session.
-The native window polls twice a second. `teach-play` plays the in-memory sample;
+The native window polls twice a second, and outside teaching re-reads `library`
+and `examples` every three seconds. `teach-play` plays the in-memory sample;
 `teach-save` takes the complete corrected `transcript` and explicitly persists
 the pair. `teach-cancel`, global `cancel`, shutdown, and lease expiry discard
 unsaved audio. Saving clears the session. These commands never replace the last

@@ -113,3 +113,11 @@ Word commands print that word with a `pack` field; removals print
 with the manifest fields described above and `audio`, the absolute path of the
 private WAV file. Reading those files does not change them; use
 `koe examples delete ID` rather than deleting them yourself.
+
+An open vocabulary window re-reads the library and the selected word's examples
+every three seconds. Changes made elsewhere appear with a notice; a field being
+edited keeps its text unless its pack or word was removed. To drive the window
+itself, set `AIZOME_KIT_INSPECT` (see Aizome's `docs/kit.md`). Its controls have
+stable names: `pack:ID`, `word:ID`, `pack-name`, `pack-description`,
+`pack-enabled`, `spelling`, `aliases`, `correct-transcript` and
+`delete-example:ID`. Buttons are found by their text.
