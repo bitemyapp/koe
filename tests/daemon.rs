@@ -425,6 +425,11 @@ async fn native_window_records_reviews_saves_and_exports() {
     assert!(
         ui.texts(window)
             .iter()
+            .any(|t| t.contains("Review the complete transcript"))
+    );
+    assert!(
+        ui.texts(window)
+            .iter()
             .any(|t| t == "Open Aizoma settings.")
     );
     // Editing through the actual text widget preserves the complete utterance.

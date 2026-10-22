@@ -279,6 +279,15 @@ impl Program for VocabularyWindow {
                                 self.load_fields();
                             }
                         } else {
+                            if matches!(command, Some(V::TeachStop { .. })) {
+                                self.message = "Microphone off. Recognizing your example…".into();
+                                self.error = false;
+                            }
+                            if matches!(command, Some(V::TeachCancel { .. })) {
+                                self.message =
+                                    "Example discarded. The recording was not saved.".into();
+                                self.error = false;
+                            }
                             if matches!(command, Some(V::TeachCancel { .. } | V::TeachSave { .. }))
                             {
                                 self.token = None;
@@ -313,6 +322,8 @@ impl Program for VocabularyWindow {
                                 if let Some(preview) = reply.preview {
                                     if self.preview.is_none() {
                                         self.transcript = EditorContent::new(&preview.corrected);
+                                        self.message = "Review the complete transcript, then save or discard this example.".into();
+                                        self.error = false;
                                     }
                                     self.preview = Some(preview);
                                 }
