@@ -1,19 +1,21 @@
-{ lib, rustPlatform, cmake, pkg-config, makeWrapper, openblas, pipewire, wl-clipboard, wtype, src }:
+{ lib, rustPlatform, cmake, pkg-config, makeWrapper, openblas, vulkan-headers, vulkan-loader, shaderc, pipewire, wl-clipboard, wtype, src, vulkanSupport ? false }:
 rustPlatform.buildRustPackage {
   pname = "aizome-koe";
   version = "0.1.0";
   inherit src;
   cargoLock.lockFile = ../Cargo.lock;
-  nativeBuildInputs = [ cmake pkg-config makeWrapper ];
+  nativeBuildInputs = [ cmake pkg-config makeWrapper ] ++ lib.optionals vulkanSupport [ shaderc rustPlatform.bindgenHook ];
   # OpenBLAS selects optimized kernels for the current CPU at runtime;
   # the rest of whisper.cpp stays portable to baseline CPUs.
-  buildInputs = [ openblas ];
-  buildFeatures = [ "openblas" ];
+  buildInputs = [ openblas ] ++ lib.optionals vulkanSupport [ vulkan-headers vulkan-loader ];
+  buildFeatures = [ "openblas" ] ++ lib.optional vulkanSupport "vulkan";
   BLAS_INCLUDE_DIRS = "${lib.getDev openblas}/include";
   OPENBLAS_PATH = "${lib.getLib openblas}";
   # Cargo drives whisper.cpp's CMake build; this isn't a top-level CMake project.
   dontUseCmakeConfigure = true;
+  # The supplied bindings omit Vulkan device functions; regenerate for GPU builds.
   WHISPER_DONT_GENERATE_BINDINGS = "1";
+  preBuild = lib.optionalString vulkanSupport "unset WHISPER_DONT_GENERATE_BINDINGS";
   GGML_NATIVE = "OFF";
   GGML_AVX = "OFF";
   GGML_AVX2 = "OFF";

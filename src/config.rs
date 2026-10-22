@@ -11,7 +11,19 @@ pub struct Config {
     pub engine: Engine,
     pub audio: Audio,
     pub output: Output,
+    pub tray: Tray,
     pub replacements: Vec<Replacement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tray {
+    pub enabled: bool,
+}
+impl Default for Tray {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +124,17 @@ pub struct Output {
     pub append_space: bool,
     pub paste_delay_ms: u64,
     pub require_same_window: bool,
+    /// Override auto selection for custom terminal bindings or app IDs.
+    pub paste_shortcut: PasteShortcut,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasteShortcut {
+    #[default]
+    Auto,
+    CtrlV,
+    CtrlShiftV,
+    SuperV,
 }
 impl Default for Output {
     fn default() -> Self {
@@ -122,6 +145,7 @@ impl Default for Output {
             append_space: false,
             paste_delay_ms: 150,
             require_same_window: true,
+            paste_shortcut: PasteShortcut::Auto,
         }
     }
 }

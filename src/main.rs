@@ -28,7 +28,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the session daemon. Recording starts only on request.
-    Daemon,
+    Daemon {
+        /// Run without a StatusNotifierItem (for headless sessions).
+        #[arg(long)]
+        no_tray: bool,
+    },
+    /// Show the tray, starting the daemon if necessary. Does not record.
+    Launch,
     /// Control dictation; start/stop can be bound to press/release for push-to-talk.
     Record {
         #[arg(value_enum)]
@@ -91,10 +97,18 @@ async fn main() {
 }
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let use_service = cli.config.is_none() && cli.socket.is_none();
     let path = cli.config.map(Ok).unwrap_or_else(config::config_path)?;
     let socket = || cli.socket.clone().map(Ok).unwrap_or_else(ipc::socket_path);
     match cli.command {
-        Command::Daemon => koe::daemon::run(Config::load(&path)?, &socket()?).await?,
+        Command::Daemon { no_tray } => {
+            let mut config = Config::load(&path)?;
+            if no_tray {
+                config.tray.enabled = false;
+            }
+            koe::daemon::run(config, &socket()?).await?;
+        }
+        Command::Launch => launch(&path, &socket()?, use_service).await?,
         Command::Status => control(&socket()?, Action::Status).await?,
         Command::Record {
             action: Action::Subscribe,
@@ -190,6 +204,20 @@ async fn run() -> Result<()> {
                     "built-in Whisper kernels"
                 }
             );
+            println!(
+                "GPU: requested {}; Vulkan compiled {}; CUDA compiled {}",
+                config.engine.gpu,
+                cfg!(feature = "vulkan"),
+                cfg!(feature = "cuda")
+            );
+            println!(
+                "System tray: {}",
+                if config.tray.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
             if config.engine.backend == config::Backend::Local {
                 let ok = config.engine.model.is_file() && cfg!(feature = "local");
                 println!(
@@ -242,6 +270,69 @@ async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn launch(
+    config: &std::path::Path,
+    socket: &std::path::Path,
+    default_socket: bool,
+) -> Result<()> {
+    use std::{process::Stdio, time::Duration};
+    if ipc::request(socket, &Request::new(Action::Status))
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // Prefer the session unit, including declarative NixOS configuration.
+    if default_socket {
+        let started = tokio::process::Command::new("systemctl")
+            .args(["--user", "start", "aizome-koe.service"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status();
+        if tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .is_ok_and(|r| r.is_ok_and(|s| s.success()))
+        {
+            wait_daemon(socket).await?;
+            return Ok(());
+        }
+    }
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .arg("--config")
+        .arg(config)
+        .arg("--socket")
+        .arg(socket)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot start Koe daemon")?;
+    if let Err(error) = wait_daemon(socket).await {
+        let _ = child.kill().await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn wait_daemon(socket: &std::path::Path) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if ipc::request(socket, &Request::new(Action::Status))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("Koe daemon did not become ready; check journalctl --user -u aizome-koe")
 }
 async fn control(socket: &std::path::Path, action: Action) -> Result<()> {
     let response = ipc::request(socket, &Request::new(action)).await?;

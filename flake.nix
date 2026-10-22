@@ -8,6 +8,7 @@
     in {
       packages = forAll (pkgs: rec {
         koe = pkgs.callPackage ./nix/package.nix { src = self; };
+        koe-vulkan = koe.override { vulkanSupport = true; };
         default = koe;
       });
       apps = forAll (pkgs: {

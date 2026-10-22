@@ -11,8 +11,13 @@ It does not depend on Hyprland, evdev, GTK, Qt, X11, or root privileges.
   socket environment before the service starts. Models remain user data,
   not part of the system closure or an activation-time download.
 - `org.aizome.Koe.desktop` makes Dictation discoverable in Aizome's launcher.
-  Its actions toggle, cancel, copy, and forget. The daemon must already be
-  running; launching the entry does not silently spawn a second service.
+  It starts the session service (or a background daemon when no unit is installed)
+  without recording, and reuses an existing daemon. Its desktop actions toggle,
+  cancel, copy, and forget.
+- The daemon exports `org.kde.StatusNotifierItem` and `com.canonical.dbusmenu`
+  on the session bus using `ksni`. Aizome's existing systray consumes the icon,
+  phase-dependent menu, tooltip, and attention status. Menu commands use Koe's
+  serialized control socket. No Aizome UI patch is required for the tray.
 - Compositor `[keys.bindings]` actions invoke short-lived CLI clients.
   Koe never opens input devices or intercepts application keys.
 - Notifications use the actual shell `notify` request, with `app = "Koe"`.
@@ -20,11 +25,11 @@ It does not depend on Hyprland, evdev, GTK, Qt, X11, or root privileges.
   never transcript contents. The current shell's OSD
   supports volume/brightness, not a dictation visualizer; Koe does not pretend
   that a new OSD kind already exists.
-- Paste goes through `wl-copy`, then compositor `synthesize` with
-  `{"type":"chord","keys":"super+v"}`. Aizome applies its own command-key
-  rules, including Ctrl+Shift+V for configured terminal applications.
-  This expects Aizome's default `command_key_for_all_apps` behavior; if you
-  disable that translation, use clipboard mode for non-kit applications.
+- Paste goes through `wl-copy`, then compositor `synthesize`: `super+v` for
+  native kit apps, `ctrl+shift+v` for recognized terminals, `ctrl+v` otherwise.
+  These are actual modifier events; they do not rely on the compositor's
+  command-key translation. `output.paste_shortcut` overrides automatic selection
+  for custom terminal app IDs or bindings.
 
 Before capture, Koe saves the focused window ID. Before clipboard replacement
 and again immediately before paste, it checks that the same window still has
@@ -81,6 +86,8 @@ Koe supplies the working transport and commands, not an unmerged UI patch.
 | Verified model manager, file transcription | implemented |
 | Native Aizome clipboard/paste, notifications, session lifecycle | implemented |
 | Shell status/meter stream, Waybar adapter | implemented |
+| System tray status, menu, shell restart recovery | implemented |
+| Vulkan package, resident inference buffers and startup warmup | implemented |
 | Graphical setup/settings and animated overlay | not implemented |
 | Parakeet, Qwen, Cohere, ElevenLabs-specific adapters | not implemented |
 | Partial transcript streaming and live typing | not implemented |

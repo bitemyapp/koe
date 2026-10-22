@@ -12,8 +12,8 @@ in the default configuration.
 
 - **Local by default.** Microphone audio stays in memory; no recordings,
   transcript history, telemetry, or automatic model downloads.
-- **Native Aizome input.** Paste uses the compositor's IPC and ❖V, including
-  its command-key translation for ordinary applications and terminals.
+- **Native Aizome input.** Paste uses the compositor's IPC with ❖V for native
+  apps, Ctrl+Shift+V for terminals, and Ctrl+V for other applications.
   Focus and lock checks prevent delivery to a different window during
   recognition. The last transcript remains available if delivery fails.
 - **A complete dictation loop.** Toggle or start/stop, pause/resume with the
@@ -23,7 +23,8 @@ in the default configuration.
   English, language selection, prompts, literal word overrides, resident
   model reuse, explicit unloading, and pinned SHA-256 model downloads.
 - **Ready for the shell.** Versioned Unix-socket control and event-driven
-  status with microphone levels, native Aizome notifications, desktop
+  status with microphone levels, a system tray with recording controls,
+  native Aizome notifications, desktop
   actions, NixOS integration and an Aizome session unit. The JSON stream is
   also usable by Waybar.
 - **Optional HTTP recognition.** Explicitly select a compatible multipart
@@ -126,13 +127,43 @@ and module do this automatically.
 The default CPU configuration uses four inference threads. The Nix package
 includes OpenBLAS, which selects optimized matrix kernels for the CPU at
 runtime while the rest of the binary stays portable. `koe doctor` reports
-whether this acceleration is compiled in. Optional
-`--features vulkan` or `--features cuda` builds require the corresponding
-SDK, plus `engine.gpu = true`. These accelerator builds are not covered by
-the CPU CI. A source build can also enable `--features openblas` with OpenBLAS
+whether this acceleration is compiled in. A ready-to-build Vulkan variant
+supports compatible AMD, Intel and NVIDIA GPUs:
+
+```sh
+nix build .#koe-vulkan
+# Set gpu = true under [engine] in ~/.config/aizome/koe.toml.
+./result/bin/koe doctor
+./result/bin/koe daemon
+```
+
+For NixOS, set `programs.aizome.koe.package = koe.packages.${pkgs.stdenv.hostPlatform.system}.koe-vulkan`
+and `programs.aizome.koe.settings.engine.gpu = true`. The GPU driver must be
+installed by the system. Source `--features vulkan` builds need Vulkan headers,
+loader, `glslc` and libclang; **unset `WHISPER_DONT_GENERATE_BINDINGS`** because the
+bundled bindings omit Vulkan functions. CUDA builds need the CUDA SDK and
+`--features cuda`. These accelerator builds require hardware testing beyond CPU
+CI. A source build can also enable `--features openblas` with OpenBLAS
 installed and `BLAS_INCLUDE_DIRS` set to its header directory.
 
+The daemon warms the model with silence at startup and retains its inference
+buffers, so this setup is done before you dictate. The microphone stays closed
+during warmup. `koe status` and the journal report the last `transcription_ms`
+without revealing speech. Selecting a known `engine.language` avoids automatic
+language detection if you only dictate in that language.
+
 ## Use
+
+The daemon appears in Aizome's system tray automatically. Click the microphone
+to open its menu: start/stop, pause/resume, cancel, copy/forget the last transcript,
+unload the model, or quit. Red means listening; blue means paused; amber means
+processing. An error changes the icon and tooltip. Opening the menu does not
+start recording. The tray reconnects when the shell restarts.
+
+Launch **Koe Dictation** from the app launcher, or run `koe launch`, to start the
+tray without recording. This reuses a running daemon and prefers the installed
+session service. Without a service, it starts a background daemon. To disable
+the tray, use `koe daemon --no-tray` or `[tray] enabled = false`.
 
 ```sh
 koe record toggle                   # start; next invocation submits
@@ -191,7 +222,10 @@ fields use defaults; unknown fields and invalid bounds are rejected.
 
 `output.mode` is `paste`, `clipboard`, or `none`. Automatic desktop selection
 uses `AIZOME_SOCKET` when present, otherwise `wtype` with Ctrl+V. For terminals
-on other desktops, use clipboard mode and your normal paste shortcut.
+on other desktops or custom bindings, set `output.paste_shortcut = "ctrl-shift-v"`.
+Other overrides are `ctrl-v` and `super-v`; `auto` is the default. Terminal text
+paste bypasses command-key translation so applications such as Codex do not
+receive their Ctrl+V image-attachment shortcut.
 Clipboard contents are replaced on successful delivery and are not restored;
 your desktop clipboard history may retain them. `none` leaves text only in
 Koe's memory for explicit retrieval.

@@ -8,3 +8,4 @@ pub mod ipc;
 pub mod models;
 pub mod protocol;
 pub mod text;
+pub mod tray;

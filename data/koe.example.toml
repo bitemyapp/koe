@@ -22,6 +22,10 @@ notify = true                           # native Aizome notifications, no transc
 append_space = false
 paste_delay_ms = 150
 require_same_window = true              # Aizome: refuse if focus changed while recognizing
+paste_shortcut = "auto"                 # auto | ctrl-v | ctrl-shift-v | super-v
+
+[tray]
+enabled = true                          # StatusNotifierItem + DBusMenu; no GTK/Qt needed
 
 [[replacements]]
 from = "seka"

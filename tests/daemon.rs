@@ -71,6 +71,7 @@ impl Harness {
         let config_path = dir.path().join("config.toml");
         let mut config = Config::default();
         config.engine.backend = Backend::Http;
+        config.tray.enabled = false;
         config.engine.http.endpoint = endpoint;
         config.output.mode = if desktop.is_some() {
             OutputMode::Paste
@@ -300,7 +301,7 @@ async fn microphone_failure_recovers_without_wedging() {
     assert_eq!(h.call(Action::Cancel).await.status.phase, Phase::Idle);
 }
 #[tokio::test]
-async fn aizome_pastes_super_v_and_checks_focus() {
+async fn aizome_pastes_terminal_text_and_checks_focus() {
     for change_focus in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("compositor.sock");
@@ -320,7 +321,7 @@ async fn aizome_pastes_super_v_and_checks_focus() {
                 let response = match value["request"].as_str().unwrap() {
                     "focused-window" => {
                         focus_reads += 1;
-                        serde_json::json!({"response":"window","window":{"id":if change_focus && focus_reads > 1 { 8 } else { 7 }}})
+                        serde_json::json!({"response":"window","window":{"id":if change_focus && focus_reads > 1 { 8 } else { 7 }, "app_id":"foot", "kit_app":false}})
                     }
                     "input-state" => {
                         serde_json::json!({"response":"input-state","state":{"pressed_keys":[]}})
@@ -350,7 +351,7 @@ async fn aizome_pastes_super_v_and_checks_focus() {
             assert!(paste.is_none());
             assert!(!h.clipboard.exists());
         } else {
-            assert_eq!(paste.unwrap()["events"][0]["keys"], "super+v");
+            assert_eq!(paste.unwrap()["events"][0]["keys"], "ctrl+shift+v");
             assert_eq!(fs::read_to_string(&h.clipboard).unwrap(), "dictated text");
         }
         compositor.abort();

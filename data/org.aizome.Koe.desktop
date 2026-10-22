@@ -2,7 +2,7 @@
 Name=Koe Dictation
 GenericName=Voice Dictation
 Comment=Speak to type in the focused application
-Exec=koe record toggle
+Exec=koe launch
 Icon=org.aizome.Koe
 Type=Application
 Categories=Utility;Accessibility;
@@ -10,7 +10,11 @@ Keywords=voice;speech;dictation;microphone;
 StartupWMClass=org.aizome.Koe
 DBusActivatable=false
 Terminal=false
-Actions=Cancel;CopyLast;ClearLast;
+Actions=Dictate;Cancel;CopyLast;ClearLast;
+
+[Desktop Action Dictate]
+Name=Start or Stop Dictation
+Exec=koe record toggle
 
 [Desktop Action Cancel]
 Name=Cancel Dictation

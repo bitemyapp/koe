@@ -35,6 +35,8 @@ download model weights or depend on an external model host.
 The two-toggle desktop regression runs the installed Aizome compositor headless,
 opens foot, sends Super+Alt+D twice through the real compositor, and verifies the
 recognized text arrives in that terminal through the real Wayland clipboard.
+It enables kitty keyboard reporting and bracketed paste, disables compositor
+command-key translation, and checks bracketed text arrives without Ctrl+V.
 It uses fixture speech, its own sockets, private configuration and no session
 bus; it never uses the login session's microphone, clipboard, or keyboard.
 It requires `aizome`, `foot`, and `wl-copy` on PATH:
@@ -49,12 +51,39 @@ The ordinary daemon suite separately checks that the second toggle immediately
 announces transcription, that another toggle during recognition reports the
 microphone is off, and that none of these notifications contains speech.
 
+The tray integration test starts a private `dbus-daemon` and StatusNotifierWatcher,
+then invokes real DBusMenu actions. It checks registration, phase updates,
+start/pause/resume/cancel, re-registration after a host restart, and clean quit.
+Its microphone is a fixture process. It does not touch the login session bus:
+
+```sh
+cargo test --test tray -- --ignored --nocapture
+```
+
 The CPU package acceleration was checked using the multilingual `base` model,
 automatic language selection, four inference threads, and the 11-second JFK
 sample on a Ryzen 7 9800X3D. A fresh-process transcription took 11.24 seconds
 with the original portable package and 2.84 seconds with OpenBLAS enabled,
 with identical output. This measures one clip and includes model loading;
 it is not a latency guarantee for all recordings or hardware.
+
+The Vulkan package was also checked on this machine's RTX 5090 using the same
+multilingual `base` model, automatic language selection, and 11-second sample.
+After startup warmup, two consecutive dictations took 39 and 41 ms to recognize,
+and 210 and 209 ms from stop to pasted text (including the default 150 ms
+clipboard delay). The headless Aizome test checked actual bracketed insertion.
+These are sample measurements, not a guarantee for every utterance. To repeat
+against an installed Vulkan package while preserving the fixture microphone:
+
+```sh
+KOE_TEST_KOE=/path/to/package/bin/.koe-wrapped KOE_TEST_GPU=1 \
+KOE_TEST_LANGUAGE=auto KOE_TEST_MODEL=/path/to/ggml-base.bin \
+KOE_TEST_WAV=/tmp/koe-smoke/jfk.wav \
+  cargo test --test aizome -- --ignored --nocapture
+```
+
+The unwrapped Nix executable is deliberate: the package's normal wrapper puts
+the real `pw-record` first on PATH, whereas this test supplies a fixture.
 
 For a manual session check, first run `koe doctor`. Choose a non-sensitive
 text buffer, start dictation, speak, stop, and observe insertion. Repeat with

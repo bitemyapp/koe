@@ -74,9 +74,9 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
     // Test text goes only to a file via a terminal in the isolated compositor.
     script(
         &bin.join("receive-paste"),
-        "stty raw -echo\ntouch \"$KOE_TEST_READY\"\nexec cat > \"$KOE_TEST_INSERTED\"",
+        "stty raw -echo\nprintf '\\033[>1u\\033[?2004h'\ntouch \"$KOE_TEST_READY\"\nexec cat > \"$KOE_TEST_INSERTED\"",
     )?;
-    let exe = env!("CARGO_BIN_EXE_koe");
+    let exe = std::env::var("KOE_TEST_KOE").unwrap_or_else(|_| env!("CARGO_BIN_EXE_koe").into());
     let binding = format!(
         "spawn {exe} --config {} --socket {} record toggle",
         config_path.display(),
@@ -84,12 +84,16 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
     );
     fs::write(
         config_home.join("aizome/settings.toml"),
-        format!("[keys.bindings]\n\"Super+Alt+D\" = {binding:?}\n"),
+        format!(
+            "[keys]\ncommand_key_for_all_apps = false\n[keys.bindings]\n\"Super+Alt+D\" = {binding:?}\n"
+        ),
     )?;
     let mut config = Config::default();
     config.engine.model = model;
-    config.engine.language = "en".into();
+    config.engine.language = std::env::var("KOE_TEST_LANGUAGE").unwrap_or_else(|_| "en".into());
+    config.engine.gpu = std::env::var_os("KOE_TEST_GPU").is_some();
     config.output.notify = false;
+    config.tray.enabled = false;
     fs::write(&config_path, toml::to_string(&config)?)?;
     let mut env = std::collections::BTreeMap::from([
         ("HOME".to_owned(), home.to_string_lossy().into_owned()),
@@ -165,7 +169,7 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
     );
     wait_file(&comp_socket).await?;
     let _daemon = Process(
-        Command::new(exe)
+        Command::new(&exe)
             .arg("--config")
             .arg(&config_path)
             .arg("--socket")
@@ -204,44 +208,75 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
     })
     .await
     .context("test terminal did not map and take focus")??;
-    let chord = json!({"request":"synthesize","events":[{"type":"chord","keys":"super+alt+d"}]});
-    ensure!(
-        compositor(&comp_socket, chord.clone()).await?["response"] == "ok",
-        "first chord rejected"
-    );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Allow startup warmup to finish before timing stop-to-paste latency.
+    tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let status = ipc::request(&socket, &Request::new(Action::Status)).await?;
-            if status.status.phase == Phase::Recording && status.status.elapsed_ms > 1000 {
+            if status.status.model_loaded {
                 break Ok::<_, anyhow::Error>(());
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await??;
-    ensure!(
-        compositor(&comp_socket, chord).await?["response"] == "ok",
-        "second chord rejected"
-    );
-    tokio::time::timeout(Duration::from_secs(40), async {
-        loop {
-            let status = ipc::request(&socket, &Request::new(Action::Status)).await?;
-            ensure!(
-                status.status.phase != Phase::Error,
-                "dictation failed: {:?}",
-                status.status.error
-            );
-            if status.status.phase == Phase::Idle && status.status.has_last {
-                break Ok::<_, anyhow::Error>(());
+    .await
+    .context("model did not warm up")??;
+    for attempt in 1..=2 {
+        let chord =
+            json!({"request":"synthesize","events":[{"type":"chord","keys":"super+alt+d"}]});
+        ensure!(
+            compositor(&comp_socket, chord.clone()).await?["response"] == "ok",
+            "first chord rejected"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = ipc::request(&socket, &Request::new(Action::Status)).await?;
+                if status.status.phase == Phase::Recording && status.status.elapsed_ms > 1000 {
+                    break Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await??;
+        })
+        .await??;
+        let stopped = std::time::Instant::now();
+        ensure!(
+            compositor(&comp_socket, chord).await?["response"] == "ok",
+            "second chord rejected"
+        );
+        tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                let status = ipc::request(&socket, &Request::new(Action::Status)).await?;
+                ensure!(
+                    status.status.phase != Phase::Error,
+                    "dictation failed: {:?}",
+                    status.status.error
+                );
+                if status.status.phase == Phase::Idle && status.status.has_last {
+                    break Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+        eprintln!(
+            "dictation {attempt}: stop-to-paste {} ms",
+            stopped.elapsed().as_millis()
+        );
+    }
     let text = fs::read_to_string(&captured_text)?;
     ensure!(
-        text.to_lowercase().contains("ask not what your country"),
-        "recognized text was not inserted into the isolated terminal"
+        text.contains("\u{1b}[200~") && text.contains("\u{1b}[201~"),
+        "terminal did not receive a bracketed text paste"
+    );
+    ensure!(
+        !text.contains('\u{16}') && !text.contains("118;5u"),
+        "Ctrl+V leaked to terminal application"
+    );
+    ensure!(
+        text.to_lowercase()
+            .matches("ask not what your country")
+            .count()
+            == 2,
+        "both recognized transcripts must be inserted into the isolated terminal"
     );
     let logs = fs::read_to_string(root.join("aizome.log"))?;
     ensure!(

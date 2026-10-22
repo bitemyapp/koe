@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::BufReader,
@@ -40,6 +40,7 @@ struct State {
     last: Option<String>,
     target: Option<u64>,
     reported_phase: Phase,
+    transcription_started: Option<Instant>,
 }
 impl State {
     fn publish(&mut self) {
@@ -100,6 +101,8 @@ impl State {
         let recognizer = self.recognizer.clone();
         self.cancelled = Arc::new(AtomicBool::new(false));
         let cancel = self.cancelled.clone();
+        self.transcription_started = Some(Instant::now());
+        self.status.transcription_ms = None;
         self.inference = Some(tokio::spawn(async move {
             recognizer.transcribe(samples, cancel).await
         }));
@@ -296,13 +299,31 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
         last: None,
         target: None,
         reported_phase: Phase::Idle,
+        transcription_started: None,
     };
+    let tray_task = state.config.tray.enabled.then(|| {
+        tokio::spawn(crate::tray::run(
+            path.to_owned(),
+            rx.clone(),
+            state.config.output.notify,
+        ))
+    });
+    let recognizer = state.recognizer.clone();
+    let mut warmup = Some(tokio::spawn(async move { recognizer.warmup().await }));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     eprintln!("Koe listening on {}", path.display());
     loop {
         tokio::select! {
+            result = async { match warmup.as_mut() { Some(task) => task.await, None => pending().await } } => {
+                warmup.take();
+                match result.context("model warmup task failed").and_then(|v| v) {
+                    Ok(()) => if state.recognizer.loaded() { eprintln!("Koe: model ready"); },
+                    Err(error) => eprintln!("Koe: model warmup failed: {error:#}"),
+                }
+                state.publish();
+            }
             _ = &mut interrupt => break,
             _ = terminate.recv() => break,
             connection = listener.accept() => {
@@ -347,6 +368,8 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
             }
             result = async { match state.inference.as_mut() { Some(t) => t.await, None => pending().await } } => {
                 state.inference.take();
+                state.status.transcription_ms = state.transcription_started.take().map(|t| t.elapsed().as_millis() as u64);
+                if let Some(ms) = state.status.transcription_ms { eprintln!("Koe: transcription took {ms} ms"); }
                 match result.context("transcription task failed").and_then(|v| v) {
                     Ok(text) => {
                         let text = state.processor.apply(&text);
@@ -375,6 +398,11 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
         }
     }
     state.cancel().await;
+    // Dropping all senders closes the tray's watch stream and unregisters SNI.
+    drop(state);
+    if let Some(task) = tray_task {
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    }
     eprintln!("Koe stopped");
     Ok(())
 }

@@ -14,8 +14,15 @@ use std::sync::{
 pub struct Recognizer {
     config: Engine,
     #[cfg(feature = "local")]
-    context: Arc<Mutex<Option<whisper_rs::WhisperContext>>>,
+    context: Arc<Mutex<Option<whisper_rs::WhisperState>>>,
     loaded: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "local")]
+unsafe extern "C" fn should_abort(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: local() passes an Arc-owned AtomicBool, kept alive until full()
+    // returns. The callback only reads it and never accesses Whisper state.
+    unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Relaxed)
 }
 impl Recognizer {
     pub fn new(config: Engine) -> Self {
@@ -32,6 +39,21 @@ impl Recognizer {
     }
     pub fn loaded(&self) -> bool {
         self.loaded.load(Ordering::Relaxed)
+    }
+    /// Prepare model buffers and GPU pipelines before the first dictation.
+    /// Silence is discarded and no_context prevents it entering later prompts.
+    pub async fn warmup(&self) -> Result<()> {
+        if self.config.backend == Backend::Local && self.config.model.is_file() {
+            let mut warmup = self.clone();
+            // Silence has no language to detect. Use a fixed language only for
+            // this discarded warmup; real dictation retains the user's setting.
+            warmup.config.language = "en".into();
+            warmup.config.prompt.clear();
+            warmup
+                .transcribe(vec![0.0; audio::RATE], Arc::new(AtomicBool::new(false)))
+                .await?;
+        }
+        Ok(())
     }
     pub fn unload(&self) -> Result<()> {
         #[cfg(feature = "local")]
@@ -81,20 +103,22 @@ impl Recognizer {
             );
             let mut params = WhisperContextParameters::default();
             params.use_gpu(self.config.gpu);
-            *context = Some(
-                WhisperContext::new_with_params(
-                    self.config
-                        .model
-                        .to_str()
-                        .context("model path is not UTF-8")?,
-                    params,
-                )
-                .context("cannot load Whisper model")?,
-            );
+            params.flash_attn(self.config.gpu);
+            let loaded = WhisperContext::new_with_params(
+                self.config
+                    .model
+                    .to_str()
+                    .context("model path is not UTF-8")?,
+                params,
+            )
+            .context("cannot load Whisper model")?;
+            *context = Some(loaded.create_state()?);
             self.loaded.store(true, Ordering::Relaxed);
         }
         ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
-        let mut state = context.as_ref().unwrap().create_state()?;
+        // Keep the inference state resident as well as the weights. Recreating
+        // it on every utterance repeats GPU allocation and pipeline setup.
+        let state = context.as_mut().unwrap();
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.config.threads as i32);
         params.set_language(if self.config.language == "auto" {
@@ -110,8 +134,16 @@ impl Recognizer {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_initial_prompt(&self.config.prompt);
-        let abort = cancel.clone();
-        params.set_abort_callback_safe(move || abort.load(Ordering::Relaxed));
+        // whisper-rs 0.16's closure adapter boxes a trait object but casts its
+        // pointer to the concrete closure type. Avoid that mismatched layout
+        // (and leaked allocation) by passing a stable atomic directly.
+        // SAFETY: cancel owns the pointee throughout this synchronous full()
+        // call, including all callbacks. Whisper invokes this callback only
+        // during the call; the function cannot panic or mutate model state.
+        unsafe {
+            params.set_abort_callback(Some(should_abort));
+            params.set_abort_callback_user_data(Arc::as_ptr(&cancel).cast_mut().cast());
+        }
         state
             .full(params, samples)
             .context("Whisper inference failed")?;
@@ -175,6 +207,24 @@ impl Recognizer {
         match value.get("text").and_then(|t| t.as_str()) {
             Some(text) => Ok(text.to_owned()),
             None => bail!("transcription response must have a string text field"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "local"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_cancellation_callback_reads_the_owned_atomic() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let data = Arc::as_ptr(&cancel).cast_mut().cast();
+        // SAFETY: the atomic remains alive throughout both calls.
+        unsafe {
+            assert!(!should_abort(data));
+        }
+        cancel.store(true, Ordering::Relaxed);
+        unsafe {
+            assert!(should_abort(data));
         }
     }
 }

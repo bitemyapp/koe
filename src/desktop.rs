@@ -1,5 +1,5 @@
 use crate::{
-    config::{Desktop, Output, OutputMode},
+    config::{Desktop, Output, OutputMode, PasteShortcut},
     ipc,
 };
 use anyhow::{Context, Result, ensure};
@@ -24,12 +24,54 @@ async fn compositor(value: Value) -> Result<Value> {
     Ok(response)
 }
 pub async fn focused_window() -> Result<Option<u64>> {
+    Ok(focused_window_info().await?["id"].as_u64())
+}
+async fn focused_window_info() -> Result<Value> {
     let value = compositor(json!({"request":"focused-window"})).await?;
     ensure!(
         value["response"] == "window",
         "unexpected Aizome focus response"
     );
-    Ok(value["window"]["id"].as_u64())
+    Ok(value["window"].clone())
+}
+
+fn paste_chord(output: &Output, window: &Value) -> &'static str {
+    match output.paste_shortcut {
+        PasteShortcut::CtrlV => "ctrl+v",
+        PasteShortcut::CtrlShiftV => "ctrl+shift+v",
+        PasteShortcut::SuperV => "super+v",
+        PasteShortcut::Auto => {
+            let app = window["app_id"].as_str().unwrap_or_default();
+            if window["kit_app"] == true || app.starts_with("org.aizome.") {
+                "super+v"
+            } else if [
+                "foot",
+                "footclient",
+                "kitty",
+                "Alacritty",
+                "org.wezfurlong.wezterm",
+                "com.mitchellh.ghostty",
+                "org.gnome.Console",
+                "org.gnome.Terminal",
+                "org.gnome.Ptyxis",
+                "org.kde.konsole",
+                "xterm",
+                "XTerm",
+                "st",
+                "st-256color",
+                "urxvt",
+                "rio",
+            ]
+            .contains(&app)
+            {
+                // Send real Ctrl+Shift modifiers. A translated command key can
+                // reach terminal programs as Ctrl+V (Codex's image attachment).
+                "ctrl+shift+v"
+            } else {
+                "ctrl+v"
+            }
+        }
+    }
 }
 async fn can_paste(target: Option<u64>, guard: bool) -> Result<()> {
     let input = compositor(json!({"request":"input-state"})).await?;
@@ -93,9 +135,10 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
     }
     tokio::time::sleep(Duration::from_millis(output.paste_delay_ms)).await;
     if uses_aizome(output) {
+        let window = focused_window_info().await?;
         can_paste(target, output.require_same_window).await?;
         let reply = compositor(
-            json!({"request":"synthesize","events":[{"type":"chord","keys":"super+v"}]}),
+            json!({"request":"synthesize","events":[{"type":"chord","keys":paste_chord(output, &window)}]}),
         )
         .await?;
         ensure!(
@@ -103,8 +146,16 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
             "unexpected Aizome paste response"
         );
     } else {
+        let chord = paste_chord(output, &Value::Null);
+        let args: &[&str] = match chord {
+            "ctrl+shift+v" => &[
+                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
+            ],
+            "super+v" => &["-M", "logo", "-k", "v", "-m", "logo"],
+            _ => &["-M", "ctrl", "-k", "v", "-m", "ctrl"],
+        };
         let mut child = Command::new("wtype")
-            .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -121,6 +172,7 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
     }
     Ok(())
 }
+
 pub fn notify(summary: &'static str, body: impl Into<String>) {
     let body = body.into();
     tokio::spawn(async move {
@@ -128,4 +180,31 @@ pub fn notify(summary: &'static str, body: impl Into<String>) {
             let _: Result<Value> = ipc::exchange(&PathBuf::from(path), &json!({"type":"request","request":"notify","app":"Koe","summary":summary,"body":body})).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_paste_uses_real_modifiers_and_native_apps_keep_command_key() {
+        let mut output = Output::default();
+        assert_eq!(
+            paste_chord(&output, &json!({"app_id":"foot"})),
+            "ctrl+shift+v"
+        );
+        assert_eq!(
+            paste_chord(&output, &json!({"app_id":"org.aizome.Sumi","kit_app":true})),
+            "super+v"
+        );
+        assert_eq!(
+            paste_chord(&output, &json!({"app_id":"google-chrome"})),
+            "ctrl+v"
+        );
+        output.paste_shortcut = PasteShortcut::CtrlShiftV;
+        assert_eq!(
+            paste_chord(&output, &json!({"app_id":"custom-terminal"})),
+            "ctrl+shift+v"
+        );
+    }
 }

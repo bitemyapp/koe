@@ -40,7 +40,10 @@ including text retained after failed delivery.
 `sequence` increases on published changes and resets at daemon restart.
 Read-only `status` requests do not emit updates. `elapsed_ms` is captured audio
 duration, excluding pauses. `level` is RMS amplitude in 0..1, not decibels or
-speech probability. Meter updates are capped at 10 Hz; paused/idle states do
+speech probability. `transcription_ms` is the last recognition attempt's wall
+time (null until one completes), excluding capture and clipboard delivery.
+`model_loaded` indicates resident model buffers, prepared at daemon startup.
+Meter updates are capped at 10 Hz; paused/idle states do
 not generate periodic events. Subscribers receive the latest snapshot and
 may miss intermediate states if they are slow. The subscription is a UI
 state stream, not an audit log.

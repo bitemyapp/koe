@@ -64,6 +64,9 @@ pub struct Status {
     pub level: f32,
     pub has_last: bool,
     pub model_loaded: bool,
+    /// Recognition wall time for the last completed attempt, excluding capture.
+    #[serde(default)]
+    pub transcription_ms: Option<u64>,
     pub error: Option<String>,
 }
 
