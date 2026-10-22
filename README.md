@@ -324,6 +324,9 @@ the last transcript. No network server is exposed.
 
 ## Development and verification
 
+For the current implementation, installed workstation state, verification
+evidence and follow-up work, see [HANDOFF.md](HANDOFF.md).
+
 ```sh
 nix develop
 cargo fmt --all -- --check

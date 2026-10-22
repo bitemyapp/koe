@@ -1,7 +1,8 @@
 # Integrating Koe into Aizome
 
-Koe is a separate Rust service and repository. It depends on Aizome's published
-JSON protocol, not its internal crates or the compositor's reloadable ABI.
+Koe is a separate Rust service and repository. Desktop control uses Aizome's
+published JSON protocol, and the optional native vocabulary window depends on
+pinned Aizome Kit crates. It does not link the compositor's reloadable ABI.
 It does not depend on Hyprland, evdev, GTK, Qt, X11, or root privileges.
 
 ## Working integration
