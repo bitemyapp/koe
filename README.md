@@ -267,14 +267,26 @@ explicit export of that pack's saved WAV recordings and complete transcripts
 to a new folder. Do not use that export when you intend to share vocabulary only.
 Delete saved examples from the window before removing their word or pack.
 
-The CLI offers the same pack operations:
+The command line does everything the window does except record, so scripts
+and agents can manage vocabulary and review training data. Every command prints
+JSON, works whether or not the daemon is running, and takes a pack's ID or name
+and a word's ID or spelling:
 
 ```sh
-koe packs list
+koe packs list                                   # the whole library
+koe packs show sekka                             # one pack, with example counts
+koe packs create "Desktop terms" --enable        # ID: desktop-terms
+koe packs edit desktop-terms --description "Team names"
+koe words add desktop-terms Fusen --alias "who sen"
+koe words edit sekka Aizome --add-alias Aizoma --remove-alias IZOMA
+koe words remove desktop-terms Fusen
+koe examples list sekka --word Aizome            # transcripts, raw recognition, WAV paths
+koe examples delete EXAMPLE_ID
 koe packs export sekka ~/sekka.koe.json
 koe packs import ~/my-domain.koe.json
 koe packs enable PACK_ID
 koe packs disable PACK_ID
+koe packs remove PACK_ID
 koe packs export-examples sekka ~/sekka-training
 ```
 

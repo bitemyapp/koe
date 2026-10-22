@@ -1,12 +1,14 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use koe::{
     config::{self, Config},
     ipc,
-    protocol::{Action, Request, Response},
+    protocol::{Action, Request, Response, VocabularyReply, VocabularyRequest as V},
+    vocabulary::{self, Example, Library, Pack, Store, Word},
 };
+use serde_json::{Value, json};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 use tokio::{io::BufReader, net::UnixStream};
@@ -41,6 +43,16 @@ enum Command {
     Packs {
         #[command(subcommand)]
         command: PackCommand,
+    },
+    /// Add, change or remove a pack's words and approved corrections.
+    Words {
+        #[command(subcommand)]
+        command: WordCommand,
+    },
+    /// Review or delete saved teaching examples (export: koe packs export-examples).
+    Examples {
+        #[command(subcommand)]
+        command: ExampleCommand,
     },
     /// Control dictation; start/stop can be bound to press/release for push-to-talk.
     Record {
@@ -79,14 +91,99 @@ enum ConfigCommand {
     Check,
     Init,
 }
+// Packs and words are named by ID or, when unambiguous, by name or spelling.
 #[derive(Subcommand)]
 enum PackCommand {
+    /// Print the whole library: packs, words, corrections and active packs.
     List,
-    Import { path: PathBuf },
-    Export { id: String, path: PathBuf },
-    Enable { id: String },
-    Disable { id: String },
-    ExportExamples { id: String, path: PathBuf },
+    /// Print a pack, whether it is active, and each word's saved examples.
+    Show {
+        pack: String,
+    },
+    /// Create a pack and print it. It stays inactive unless --enable is given.
+    Create {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Stable ID (default: derived from the name).
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        enable: bool,
+    },
+    /// Rename a pack or change its description, and print it.
+    Edit {
+        pack: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Remove a pack. Delete its saved examples first.
+    Remove {
+        pack: String,
+    },
+    /// Import a shared .koe.json pack; it starts inactive.
+    Import {
+        path: PathBuf,
+    },
+    /// Write a pack to a new .koe.json file. Recordings are never included.
+    Export {
+        pack: String,
+        path: PathBuf,
+    },
+    /// Use a pack's words and corrections across the desktop.
+    Enable {
+        pack: String,
+    },
+    Disable {
+        pack: String,
+    },
+    /// Copy a pack's saved examples to a new folder: audio/*.wav and manifest.jsonl.
+    ExportExamples {
+        pack: String,
+        path: PathBuf,
+    },
+}
+#[derive(Subcommand)]
+enum WordCommand {
+    /// Add a word to a pack and print it.
+    Add {
+        pack: String,
+        /// The written form dictation should produce.
+        spelling: String,
+        /// A misrecognition to replace with SPELLING; repeat for more.
+        #[arg(long = "alias", value_name = "ALIAS")]
+        aliases: Vec<String>,
+        /// Stable ID (default: derived from the spelling).
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Change a word's written form or approved corrections, and print it.
+    Edit {
+        pack: String,
+        word: String,
+        #[arg(long)]
+        spelling: Option<String>,
+        #[arg(long = "add-alias", value_name = "ALIAS")]
+        add: Vec<String>,
+        #[arg(long = "remove-alias", value_name = "ALIAS")]
+        remove: Vec<String>,
+    },
+    /// Remove a word. Delete its saved examples first.
+    Remove { pack: String, word: String },
+}
+#[derive(Subcommand)]
+enum ExampleCommand {
+    /// Print saved examples (all packs' by default), newest first: complete
+    /// transcripts, raw recognition, provenance and each recording's path.
+    List {
+        pack: Option<String>,
+        #[arg(long, requires = "pack")]
+        word: Option<String>,
+    },
+    /// Delete a saved example's recording and transcript.
+    Delete { id: String },
 }
 #[derive(Subcommand)]
 enum ModelCommand {
@@ -137,60 +234,9 @@ async fn run() -> Result<()> {
                 "native vocabulary window is not compiled in; build with --features ui or use koe packs"
             );
         }
-        Command::Packs { command } => {
-            use koe::protocol::VocabularyRequest as V;
-            let socket = socket()?;
-            let mut response = ipc::request(&socket, &Request::vocabulary(V::Library)).await?;
-            ensure!(
-                response.ok,
-                "{}",
-                response.error.as_deref().unwrap_or("cannot load packs")
-            );
-            let mut library = response
-                .vocabulary
-                .as_mut()
-                .and_then(|v| v.library.take())
-                .context("daemon has no vocabulary support")?;
-            let command = match command {
-                PackCommand::List => {
-                    println!("{}", serde_json::to_string_pretty(&library)?);
-                    return Ok(());
-                }
-                PackCommand::Import { path } => V::Import {
-                    path: std::path::absolute(path)?,
-                    revision: library.revision,
-                },
-                PackCommand::Export { id, path } => V::Export {
-                    pack: id,
-                    path: std::path::absolute(path)?,
-                },
-                PackCommand::ExportExamples { id, path } => V::ExportExamples {
-                    pack: id,
-                    path: std::path::absolute(path)?,
-                },
-                PackCommand::Enable { id } => {
-                    ensure!(library.packs.iter().any(|p| p.id == id), "unknown pack ID");
-                    if !library.enabled.contains(&id) {
-                        library.enabled.push(id);
-                    }
-                    V::SaveLibrary { library }
-                }
-                PackCommand::Disable { id } => {
-                    library.enabled.retain(|p| p != &id);
-                    V::SaveLibrary { library }
-                }
-            };
-            let response = ipc::request(&socket, &Request::vocabulary(command)).await?;
-            ensure!(
-                response.ok,
-                "{}",
-                response
-                    .error
-                    .as_deref()
-                    .unwrap_or("vocabulary request failed")
-            );
-            println!("{}", serde_json::to_string_pretty(&response.vocabulary)?);
-        }
+        Command::Packs { command } => packs(&Vocab::open(&path)?, command)?,
+        Command::Words { command } => words(&Vocab::open(&path)?, command)?,
+        Command::Examples { command } => examples(&Vocab::open(&path)?, command)?,
         Command::Status => control(&socket()?, Action::Status).await?,
         Command::Record {
             action: Action::Subscribe,
@@ -353,6 +399,344 @@ async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Vocabulary commands use the store directly, with the window's lock and
+/// revision checks, so scripts and agents work whether or not the daemon runs.
+struct Vocab {
+    store: Store,
+    config: Config,
+}
+impl Vocab {
+    fn open(config: &Path) -> Result<Self> {
+        Ok(Self {
+            store: Store::user()?,
+            config: Config::load(config)?,
+        })
+    }
+    fn dispatch(&self, command: V) -> Result<VocabularyReply> {
+        self.store.dispatch(command, &self.config)
+    }
+    /// Change the current library and save it, starting again when another
+    /// window or command saved first.
+    fn edit<T>(&self, mut edit: impl FnMut(&mut Library) -> Result<T>) -> Result<(Library, T)> {
+        let mut attempts = 0;
+        loop {
+            let mut library = self.store.load()?;
+            let revision = library.revision;
+            let result = edit(&mut library)?;
+            match self.dispatch(V::SaveLibrary { library }) {
+                Ok(reply) => return Ok((reply.library.context("library was not saved")?, result)),
+                Err(_) if attempts < 3 && self.store.load()?.revision != revision => attempts += 1,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    fn pack(&self, library: &Library, id: &str) -> Result<Value> {
+        let pack = library
+            .packs
+            .iter()
+            .find(|p| p.id == id)
+            .context("pack no longer exists")?;
+        let examples = self.store.examples(id, None)?;
+        Ok(json!({
+            "id": pack.id,
+            "name": pack.name,
+            "description": pack.description,
+            "enabled": library.enabled.contains(&pack.id),
+            "words": pack.words.iter().map(|w| word_json(w, &examples)).collect::<Vec<_>>(),
+        }))
+    }
+    fn word(&self, library: &Library, pack: &str, id: &str) -> Result<Value> {
+        let mut word = word_json(
+            library.word(pack, id)?,
+            &self.store.examples(pack, Some(id))?,
+        );
+        word["pack"] = pack.into();
+        Ok(word)
+    }
+}
+fn word_json(word: &Word, examples: &[Example]) -> Value {
+    json!({
+        "id": word.id,
+        "spelling": word.spelling,
+        "aliases": word.aliases,
+        "examples": examples.iter().filter(|e| e.word_id == word.id).count(),
+    })
+}
+fn print(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+fn same(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+fn pack_id(library: &Library, key: &str) -> Result<String> {
+    if library.packs.iter().any(|p| p.id == key) {
+        return Ok(key.into());
+    }
+    match library
+        .packs
+        .iter()
+        .filter(|p| same(&p.name, key))
+        .collect::<Vec<_>>()[..]
+    {
+        [pack] => Ok(pack.id.clone()),
+        [] => bail!("no pack {key}; see koe packs list"),
+        _ => bail!("several packs are named {key}; use its ID"),
+    }
+}
+fn pack_mut<'a>(library: &'a mut Library, key: &str) -> Result<&'a mut Pack> {
+    let id = pack_id(library, key)?;
+    Ok(library.packs.iter_mut().find(|p| p.id == id).unwrap())
+}
+fn word_id(pack: &Pack, key: &str) -> Result<String> {
+    if pack.words.iter().any(|w| w.id == key) {
+        return Ok(key.into());
+    }
+    match pack
+        .words
+        .iter()
+        .filter(|w| same(&w.spelling, key))
+        .collect::<Vec<_>>()[..]
+    {
+        [word] => Ok(word.id.clone()),
+        [] => bail!(
+            "{} has no word {key}; see koe packs show {}",
+            pack.name,
+            pack.id
+        ),
+        _ => bail!("several words are spelled {key}; use its ID"),
+    }
+}
+
+fn enable(library: &mut Library, pack: &str, on: bool) -> Result<String> {
+    let id = pack_id(library, pack)?;
+    if !on {
+        library.enabled.retain(|p| p != &id);
+    } else if !library.enabled.contains(&id) {
+        library.enabled.push(id.clone());
+    }
+    Ok(id)
+}
+
+fn packs(vocab: &Vocab, command: PackCommand) -> Result<()> {
+    let library = vocab.store.load()?;
+    let (library, id) = match command {
+        PackCommand::List => return print(&library),
+        PackCommand::Show { pack } => {
+            let id = pack_id(&library, &pack)?;
+            (library, id)
+        }
+        PackCommand::Create {
+            name,
+            description,
+            id,
+            enable,
+        } => vocab.edit(|library| {
+            let id = match &id {
+                Some(id) => id.clone(),
+                None => {
+                    vocabulary::readable_id(&name, |id| library.packs.iter().any(|p| p.id == id))?
+                }
+            };
+            ensure!(
+                !library.packs.iter().any(|p| p.id == id),
+                "pack ID {id} is already used"
+            );
+            library.packs.push(Pack {
+                id: id.clone(),
+                name: name.trim().into(),
+                description: description.trim().into(),
+                words: vec![],
+            });
+            if enable {
+                library.enabled.push(id.clone());
+            }
+            Ok(id)
+        })?,
+        PackCommand::Edit {
+            pack,
+            name,
+            description,
+        } => {
+            ensure!(
+                name.is_some() || description.is_some(),
+                "pass --name or --description"
+            );
+            vocab.edit(|library| {
+                let pack = pack_mut(library, &pack)?;
+                if let Some(name) = &name {
+                    pack.name = name.trim().into();
+                }
+                if let Some(description) = &description {
+                    pack.description = description.trim().into();
+                }
+                Ok(pack.id.clone())
+            })?
+        }
+        PackCommand::Remove { pack } => {
+            let (_, id) = vocab.edit(|library| {
+                let id = pack_id(library, &pack)?;
+                library.packs.retain(|p| p.id != id);
+                library.enabled.retain(|p| p != &id);
+                Ok(id)
+            })?;
+            return print(&json!({ "removed": id }));
+        }
+        PackCommand::Import { path } => {
+            let library = vocab
+                .dispatch(V::Import {
+                    path,
+                    revision: library.revision,
+                })?
+                .library
+                .context("pack was not imported")?;
+            let id = library
+                .packs
+                .last()
+                .context("pack was not imported")?
+                .id
+                .clone();
+            (library, id)
+        }
+        PackCommand::Enable { pack } => vocab.edit(|library| enable(library, &pack, true))?,
+        PackCommand::Disable { pack } => vocab.edit(|library| enable(library, &pack, false))?,
+        PackCommand::Export { pack, path } => {
+            let pack = pack_id(&library, &pack)?;
+            return print(&vocab.dispatch(V::Export { pack, path })?);
+        }
+        PackCommand::ExportExamples { pack, path } => {
+            let pack = pack_id(&library, &pack)?;
+            return print(&vocab.dispatch(V::ExportExamples { pack, path })?);
+        }
+    };
+    print(&vocab.pack(&library, &id)?)
+}
+
+fn words(vocab: &Vocab, command: WordCommand) -> Result<()> {
+    let (library, (pack, id)) = match command {
+        WordCommand::Add {
+            pack,
+            spelling,
+            aliases,
+            id,
+        } => vocab.edit(|library| {
+            let pack = pack_mut(library, &pack)?;
+            let spelling = spelling.trim();
+            ensure!(
+                !pack.words.iter().any(|w| same(&w.spelling, spelling)),
+                "{} already has {spelling}; use koe words edit",
+                pack.name
+            );
+            let id = match &id {
+                Some(id) => id.clone(),
+                None => {
+                    vocabulary::readable_id(spelling, |id| pack.words.iter().any(|w| w.id == id))?
+                }
+            };
+            pack.words.push(Word {
+                id: id.clone(),
+                spelling: spelling.into(),
+                aliases: aliases.iter().map(|a| a.trim().into()).collect(),
+            });
+            Ok((pack.id.clone(), id))
+        })?,
+        WordCommand::Edit {
+            pack,
+            word,
+            spelling,
+            add,
+            remove,
+        } => {
+            ensure!(
+                spelling.is_some() || !add.is_empty() || !remove.is_empty(),
+                "pass --spelling, --add-alias or --remove-alias"
+            );
+            vocab.edit(|library| {
+                let pack = pack_mut(library, &pack)?;
+                let id = word_id(pack, &word)?;
+                if let Some(spelling) = &spelling {
+                    ensure!(
+                        !pack
+                            .words
+                            .iter()
+                            .any(|w| w.id != id && same(&w.spelling, spelling.trim())),
+                        "{} already has {spelling}",
+                        pack.name
+                    );
+                }
+                let word = pack.words.iter_mut().find(|w| w.id == id).unwrap();
+                if let Some(spelling) = &spelling {
+                    word.spelling = spelling.trim().into();
+                }
+                for alias in &remove {
+                    let count = word.aliases.len();
+                    word.aliases.retain(|a| !same(a, alias.trim()));
+                    ensure!(
+                        word.aliases.len() < count,
+                        "{} has no correction {alias}",
+                        word.spelling
+                    );
+                }
+                for alias in &add {
+                    if !word.aliases.iter().any(|a| same(a, alias.trim())) {
+                        word.aliases.push(alias.trim().into());
+                    }
+                }
+                Ok((pack.id.clone(), id))
+            })?
+        }
+        WordCommand::Remove { pack, word } => {
+            let (_, (pack, id)) = vocab.edit(|library| {
+                let pack = pack_mut(library, &pack)?;
+                let id = word_id(pack, &word)?;
+                pack.words.retain(|w| w.id != id);
+                Ok((pack.id.clone(), id))
+            })?;
+            return print(&json!({ "removed": id, "pack": pack }));
+        }
+    };
+    print(&vocab.word(&library, &pack, &id)?)
+}
+
+fn examples(vocab: &Vocab, command: ExampleCommand) -> Result<()> {
+    match command {
+        ExampleCommand::List { pack, word } => {
+            let library = vocab.store.load()?;
+            let packs = match &pack {
+                Some(pack) => vec![pack_id(&library, pack)?],
+                None => library.packs.iter().map(|p| p.id.clone()).collect(),
+            };
+            let word = match &word {
+                Some(word) => Some(word_id(
+                    library.packs.iter().find(|p| p.id == packs[0]).unwrap(),
+                    word,
+                )?),
+                None => None,
+            };
+            let mut examples = vec![];
+            for pack in &packs {
+                examples.extend(vocab.store.examples(pack, word.as_deref())?);
+            }
+            examples.sort_by_key(|e| std::cmp::Reverse(e.created_ms));
+            let mut records = vec![];
+            for example in examples {
+                let audio = vocab.store.example_audio(&example.id)?;
+                let mut record = serde_json::to_value(example)?;
+                record["audio"] = json!(audio);
+                records.push(record);
+            }
+            print(&records)
+        }
+        ExampleCommand::Delete { id } => {
+            vocab
+                .store
+                .delete_example(&id)
+                .with_context(|| format!("cannot delete saved example {id}"))?;
+            print(&json!({ "removed": id }))
+        }
+    }
 }
 
 async fn launch(

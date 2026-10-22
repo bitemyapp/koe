@@ -92,7 +92,9 @@ the real `pw-record` first on PATH, whereas this test supplies a fixture.
 
 Vocabulary tests check pack import/export, inactive imports, conflicting aliases,
 stale edits, bounded input, private permissions, WAV labels and checksums, deletion,
-and the separation of vocabulary from training exports. Daemon tests exercise
+and the separation of vocabulary from training exports. A command-line test runs
+the `koe packs`, `koe words` and `koe examples` commands scripts and agents use,
+without a daemon, and checks their JSON. Daemon tests exercise
 explicit save, discard, lease expiry, token ownership, next-dictation reload,
 and verify that teaching never writes the clipboard or ordinary last transcript.
 They also verify that ordinary dictation creates no saved training audio.

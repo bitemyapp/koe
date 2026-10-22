@@ -229,6 +229,25 @@ pub fn new_id() -> Result<String> {
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
+/// A readable ID for scripts to name ("Desktop terms" → `desktop-terms`),
+/// or a random one when `text` has no ASCII letters or digits or it's taken.
+pub fn readable_id(text: &str, taken: impl Fn(&str) -> bool) -> Result<String> {
+    let mut id = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.is_empty() && !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    id.truncate(64);
+    let id = id.trim_end_matches('-');
+    if id.is_empty() || taken(id) {
+        new_id()
+    } else {
+        Ok(id.into())
+    }
+}
 pub fn valid_id(id: &str) -> Result<()> {
     ensure!(
         !id.is_empty()
@@ -459,7 +478,13 @@ impl Store {
         fs::rename(temp.path(), examples.join(&example.id))?;
         Ok(())
     }
-    fn examples(&self, pack: &str, word: Option<&str>) -> Result<Vec<Example>> {
+    /// A saved example's recording, mono 16-bit PCM WAV.
+    pub fn example_audio(&self, id: &str) -> Result<PathBuf> {
+        valid_id(id)?;
+        Ok(self.root.join("examples").join(id).join("audio.wav"))
+    }
+    /// Complete saved examples, newest first.
+    pub fn examples(&self, pack: &str, word: Option<&str>) -> Result<Vec<Example>> {
         valid_id(pack)?;
         let root = self.root.join("examples");
         if !root.exists() {
@@ -528,13 +553,7 @@ impl Store {
         private_dir(&temp.path().join("audio"))?;
         let mut manifest = Vec::new();
         for example in &examples {
-            valid_id(&example.id)?;
-            let source = self
-                .root
-                .join("examples")
-                .join(&example.id)
-                .join("audio.wav");
-            let audio = read_limited(&source, 2 * 1024 * 1024)?;
+            let audio = read_limited(&self.example_audio(&example.id)?, 2 * 1024 * 1024)?;
             use sha2::Digest;
             ensure!(
                 format!("{:x}", sha2::Sha256::digest(&audio)) == example.audio_sha256,

@@ -84,3 +84,32 @@ not overwrite existing destinations. This manifest is a starting dataset, not
 a trained model: later training needs quality checks, diverse examples, held-out
 evaluation, and conversion to the chosen trainer's input format. The model
 filename is provenance, not a cryptographic identity for custom weights.
+
+## Scripts and agents
+
+The `koe packs`, `koe words` and `koe examples` commands cover everything the
+window does except recording, which needs a person's voice. They act on the
+store directly, under the same lock, revision check and validation as the
+window, so they work whether or not the daemon runs; a save that loses a race
+with another writer is retried from the new revision. Packs are named by ID or,
+when unambiguous, by name; words by ID or spelling, ignoring case. Creating a
+pack or word derives a readable ID from its name or spelling (`Desktop terms`
+→ `desktop-terms`) unless `--id` is given. Relative paths are relative to the
+command's working directory.
+
+Output is JSON on stdout. A failure exits with status 1 and a one-line reason
+on stderr, such as a conflicting correction or a word that still has saved
+examples. Commands that change a pack print it:
+
+```json
+{"id": "sekka", "name": "Sekka", "description": "Names from the Sekka desktop",
+ "enabled": true,
+ "words": [{"id": "aizome", "spelling": "Aizome", "aliases": ["Isome", "IZOMA"], "examples": 2}]}
+```
+
+Word commands print that word with a `pack` field; removals print
+`{"removed": ID}`. `koe packs list` prints the private library format above.
+`koe examples list [PACK [--word WORD]]` prints saved examples, newest first,
+with the manifest fields described above and `audio`, the absolute path of the
+private WAV file. Reading those files does not change them; use
+`koe examples delete ID` rather than deleting them yourself.
