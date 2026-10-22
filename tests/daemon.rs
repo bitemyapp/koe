@@ -46,6 +46,14 @@ impl Harness {
         desktop: Option<&Path>,
         configure: impl FnOnce(&mut Config),
     ) -> Self {
+        Self::with_shell(endpoint, desktop, None, configure).await
+    }
+    async fn with_shell(
+        endpoint: String,
+        desktop: Option<&Path>,
+        shell: Option<&Path>,
+        configure: impl FnOnce(&mut Config),
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         fs::create_dir(&bin).unwrap();
@@ -98,6 +106,9 @@ impl Harness {
             .stderr(Stdio::null());
         if let Some(socket) = desktop {
             command.env("AIZOME_SOCKET", socket);
+        }
+        if let Some(socket) = shell {
+            command.env("AIZOME_SHELL_SOCKET", socket);
         }
         let child = command.spawn().unwrap();
         let harness = Self {
@@ -390,4 +401,81 @@ async fn malformed_server_response_is_reported_without_echoing_private_text() {
     assert!(!error.contains("secret speech"));
     assert!(h.call(Action::Cancel).await.ok);
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn second_toggle_stops_capture_and_announces_transcription_before_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell_path = dir.path().join("shell.sock");
+    let listener = UnixListener::bind(&shell_path).unwrap();
+    let (sent, mut notifications) = tokio::sync::mpsc::channel(16);
+    let shell = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let line = ipc::read_line(&mut BufReader::new(&mut stream))
+                .await
+                .unwrap()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            sent.send(value).await.unwrap();
+            ipc::write_json(&mut stream, &serde_json::json!({"type":"reply","ok":true}))
+                .await
+                .unwrap();
+        }
+    });
+    let (endpoint, server) = http_server(
+        Duration::from_millis(700),
+        r#"{"text":"private recognized words"}"#,
+    )
+    .await;
+    let h = Harness::with_shell(endpoint, None, Some(&shell_path), |c| {
+        c.output.notify = true
+    })
+    .await;
+    assert_eq!(h.call(Action::Toggle).await.status.phase, Phase::Recording);
+    let listening = tokio::time::timeout(Duration::from_secs(3), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(listening["summary"], "Listening");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let stopped = h.call(Action::Toggle).await;
+    assert!(stopped.ok);
+    assert_eq!(stopped.status.phase, Phase::Transcribing);
+    let transcribing = tokio::time::timeout(Duration::from_secs(3), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(transcribing["summary"], "Transcribing");
+    assert!(
+        transcribing["body"]
+            .as_str()
+            .unwrap()
+            .contains("Recording stopped")
+    );
+    let busy = h.call(Action::Toggle).await;
+    assert!(!busy.ok);
+    assert!(busy.error.unwrap().contains("recording has stopped"));
+    let reminder = tokio::time::timeout(Duration::from_secs(3), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reminder["summary"], "Transcribing");
+    assert!(
+        reminder["body"]
+            .as_str()
+            .unwrap()
+            .contains("microphone is off")
+    );
+    h.wait_for(Phase::Idle).await;
+    let complete = tokio::time::timeout(Duration::from_secs(3), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete["summary"], "Dictation complete");
+    for value in [listening, transcribing, reminder, complete] {
+        assert!(!value.to_string().contains("private recognized words"));
+    }
+    server.await.unwrap();
+    shell.abort();
 }

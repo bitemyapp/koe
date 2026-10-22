@@ -121,7 +121,8 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
     }
     Ok(())
 }
-pub fn notify(summary: &'static str, body: &'static str) {
+pub fn notify(summary: &'static str, body: impl Into<String>) {
+    let body = body.into();
     tokio::spawn(async move {
         if let Some(path) = env::var_os("AIZOME_SHELL_SOCKET") {
             let _: Result<Value> = ipc::exchange(&PathBuf::from(path), &json!({"type":"request","request":"notify","app":"Koe","summary":summary,"body":body})).await;

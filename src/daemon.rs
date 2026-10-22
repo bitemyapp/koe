@@ -39,9 +39,16 @@ struct State {
     cancelled: Arc<AtomicBool>,
     last: Option<String>,
     target: Option<u64>,
+    reported_phase: Phase,
 }
 impl State {
     fn publish(&mut self) {
+        if self.status.phase != self.reported_phase {
+            // State transitions only: no audio, recognized text or 10 Hz meter logs.
+            let phase = serde_json::to_value(self.status.phase).expect("phase serializes");
+            eprintln!("Koe: {}", phase.as_str().expect("phase is a string"));
+            self.reported_phase = self.status.phase;
+        }
         self.status.sequence += 1;
         self.status.has_last = self.last.is_some();
         self.status.model_loaded = self.recognizer.loaded();
@@ -50,13 +57,12 @@ impl State {
     fn fail(&mut self, error: anyhow::Error) {
         self.status.phase = Phase::Error;
         self.status.level = 0.0;
-        self.status.error = Some(format!("{error:#}"));
+        let message = format!("{error:#}");
+        eprintln!("Koe: {message}");
+        self.status.error = Some(message.clone());
         self.samples.clear();
         if self.config.output.notify {
-            desktop::notify(
-                "Dictation needs attention",
-                "Run koe status for details. Your last transcript is available with koe record last.",
-            );
+            desktop::notify("Dictation needs attention", message);
         }
         self.publish();
     }
@@ -98,6 +104,12 @@ impl State {
             recognizer.transcribe(samples, cancel).await
         }));
         self.status.phase = Phase::Transcribing;
+        if self.config.output.notify {
+            desktop::notify(
+                "Transcribing",
+                "Recording stopped. Turning your speech into text…",
+            );
+        }
         Ok(())
     }
     async fn cancel(&mut self) {
@@ -120,6 +132,15 @@ impl State {
             match self.status.phase {
                 Phase::Recording | Phase::Paused => Action::Stop,
                 Phase::Idle | Phase::Error => Action::Start,
+                Phase::Transcribing => {
+                    if self.config.output.notify {
+                        desktop::notify(
+                            "Transcribing",
+                            "Your microphone is off. Wait for the result, or cancel dictation.",
+                        );
+                    }
+                    bail!("recording has stopped; transcription is still running")
+                }
                 _ => bail!("dictation is busy; wait or cancel"),
             }
         } else {
@@ -274,6 +295,7 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
         cancelled: Arc::new(AtomicBool::new(false)),
         last: None,
         target: None,
+        reported_phase: Phase::Idle,
     };
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let interrupt = tokio::signal::ctrl_c();
@@ -353,5 +375,6 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
         }
     }
     state.cancel().await;
+    eprintln!("Koe stopped");
     Ok(())
 }

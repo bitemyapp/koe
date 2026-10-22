@@ -1,10 +1,16 @@
-{ lib, rustPlatform, cmake, pkg-config, makeWrapper, pipewire, wl-clipboard, wtype, src }:
+{ lib, rustPlatform, cmake, pkg-config, makeWrapper, openblas, pipewire, wl-clipboard, wtype, src }:
 rustPlatform.buildRustPackage {
   pname = "aizome-koe";
   version = "0.1.0";
   inherit src;
   cargoLock.lockFile = ../Cargo.lock;
   nativeBuildInputs = [ cmake pkg-config makeWrapper ];
+  # OpenBLAS selects optimized kernels for the current CPU at runtime;
+  # the rest of whisper.cpp stays portable to baseline CPUs.
+  buildInputs = [ openblas ];
+  buildFeatures = [ "openblas" ];
+  BLAS_INCLUDE_DIRS = "${lib.getDev openblas}/include";
+  OPENBLAS_PATH = "${lib.getLib openblas}";
   # Cargo drives whisper.cpp's CMake build; this isn't a top-level CMake project.
   dontUseCmakeConfigure = true;
   WHISPER_DONT_GENERATE_BINDINGS = "1";

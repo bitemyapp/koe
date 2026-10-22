@@ -17,6 +17,7 @@ path = "src/main.rs"
 [features]
 default = ["local"]
 local = ["dep:whisper-rs"]
+openblas = ["local", "whisper-rs/openblas"]
 vulkan = ["local", "whisper-rs/vulkan"]
 cuda = ["local", "whisper-rs/cuda"]
 

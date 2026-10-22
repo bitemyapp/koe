@@ -123,11 +123,14 @@ The user manager must have `koe` in its executable search path. If installed
 outside it, set `ExecStart` to the binary's absolute path. The Nix package
 and module do this automatically.
 
-The default CPU build uses four inference threads. Optional
+The default CPU configuration uses four inference threads. The Nix package
+includes OpenBLAS, which selects optimized matrix kernels for the CPU at
+runtime while the rest of the binary stays portable. `koe doctor` reports
+whether this acceleration is compiled in. Optional
 `--features vulkan` or `--features cuda` builds require the corresponding
 SDK, plus `engine.gpu = true`. These accelerator builds are not covered by
-the CPU CI. The Nix package disables host-specific CPU instructions so a
-build can be distributed to other machines.
+the CPU CI. A source build can also enable `--features openblas` with OpenBLAS
+installed and `BLAS_INCLUDE_DIRS` set to its header directory.
 
 ## Use
 
@@ -146,6 +149,13 @@ koe model unload                    # release resident model memory while idle
 koe status
 koe watch                           # newline-delimited JSON status stream
 ```
+
+The second toggle closes the microphone immediately, then shows **Transcribing**
+while recognition runs. Wait for **Dictation complete** before starting another
+recording. Pressing toggle while transcription is running shows a reminder;
+`cancel` discards it. The daemon logs state transitions and failures to its
+terminal or journal, without logging recognized text. Failure notifications
+include the reason, such as a changed focus or unavailable clipboard.
 
 Aizome's current binding configuration supports toggle actions; press/release
 push-to-talk requires a hotkey host that provides both edges. There is no

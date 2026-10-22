@@ -16,7 +16,8 @@ It does not depend on Hyprland, evdev, GTK, Qt, X11, or root privileges.
 - Compositor `[keys.bindings]` actions invoke short-lived CLI clients.
   Koe never opens input devices or intercepts application keys.
 - Notifications use the actual shell `notify` request, with `app = "Koe"`.
-  They announce state, never transcript contents. The current shell's OSD
+  They announce listening, transcription, completion and actionable failures,
+  never transcript contents. The current shell's OSD
   supports volume/brightness, not a dictation visualizer; Koe does not pretend
   that a new OSD kind already exists.
 - Paste goes through `wl-copy`, then compositor `synthesize` with

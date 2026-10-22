@@ -181,6 +181,15 @@ async fn run() -> Result<()> {
                 config.engine.backend,
                 cfg!(feature = "local")
             );
+            #[cfg(feature = "local")]
+            println!(
+                "CPU acceleration: {}",
+                if cfg!(feature = "openblas") {
+                    "OpenBLAS (runtime CPU selection)"
+                } else {
+                    "built-in Whisper kernels"
+                }
+            );
             if config.engine.backend == config::Backend::Local {
                 let ok = config.engine.model.is_file() && cfg!(feature = "local");
                 println!(
