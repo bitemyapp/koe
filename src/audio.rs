@@ -183,3 +183,29 @@ pub fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>> {
     writer.finalize()?;
     Ok(output.into_inner())
 }
+
+/// Play only a user-requested teaching preview; no audio file is created.
+pub async fn play(samples: &[f32]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = Command::new("pw-play")
+        .args(["--raw", "--rate=16000", "--channels=1", "--format=s16", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("cannot start pw-play")?;
+    let bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_ne_bytes())
+        .collect();
+    tokio::time::timeout(Duration::from_secs(35), async {
+        let mut stdin = child.stdin.take().context("pw-play has no stdin")?;
+        stdin.write_all(&bytes).await?;
+        drop(stdin);
+        ensure!(child.wait().await?.success(), "audio playback failed");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("audio playback timed out")?
+}

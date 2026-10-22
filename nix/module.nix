@@ -45,7 +45,7 @@ in {
         UMask = "0077";
         LimitCORE = 0;
         NoNewPrivileges = true;
-        PrivateTmp = true;
+        PrivateTmp = false;
         TimeoutStopSec = 10;
         EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
       };

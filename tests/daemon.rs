@@ -1,7 +1,7 @@
 use koe::{
     config::{Backend, Config, OutputMode},
     ipc,
-    protocol::{Action, Phase, Request, Response},
+    protocol::{Action, Phase, Request, Response, VocabularyRequest as V},
 };
 use std::{
     fs,
@@ -67,6 +67,7 @@ impl Harness {
             "cat \"$KOE_TEST_PCM\"\nexec sleep 60",
         );
         script(&bin.join("wl-copy"), "cat > \"$KOE_TEST_CLIPBOARD\"");
+        script(&bin.join("pw-play"), "cat > \"$KOE_TEST_PLAYBACK\"");
         let clipboard = dir.path().join("clipboard.txt");
         let config_path = dir.path().join("config.toml");
         let mut config = Config::default();
@@ -100,6 +101,8 @@ impl Harness {
             )
             .env("KOE_TEST_PCM", raw)
             .env("KOE_TEST_CLIPBOARD", &clipboard)
+            .env("KOE_TEST_PLAYBACK", dir.path().join("played.raw"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
             .env_remove("AIZOME_SOCKET")
             .env_remove("AIZOME_SHELL_SOCKET")
             .stdin(Stdio::null())
@@ -133,6 +136,14 @@ impl Harness {
         ipc::request(&self.socket, &Request::new(action))
             .await
             .unwrap()
+    }
+    async fn vocabulary(&self, command: V) -> Response {
+        ipc::request(&self.socket, &Request::vocabulary(command))
+            .await
+            .unwrap()
+    }
+    fn vocabulary_root(&self) -> PathBuf {
+        self._dir.path().join("data/aizome/koe/vocabulary")
     }
     async fn wait_for(&self, phase: Phase) -> Response {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -197,6 +208,274 @@ async fn http_server(
         request
     });
     (format!("http://{addr}/inference"), task)
+}
+
+#[tokio::test]
+async fn teaching_keeps_audio_only_after_explicit_save_and_never_delivers() {
+    let (endpoint, server) =
+        http_server(Duration::ZERO, r#"{"text":"Open Isome settings."}"#).await;
+    let h = Harness::configured(endpoint, None, |config| {
+        config.output.mode = OutputMode::Clipboard
+    })
+    .await;
+    let token = "teaching-owner".to_string();
+    assert!(
+        h.vocabulary(V::TeachStart {
+            token: token.clone(),
+            pack: "sekka".into(),
+            word: "aizome".into()
+        })
+        .await
+        .ok
+    );
+    assert!(!h.call(Action::Start).await.ok);
+    assert!(
+        !h.vocabulary(V::TeachCancel {
+            token: "wrong-owner".into()
+        })
+        .await
+        .ok
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while h.call(Action::Status).await.status.elapsed_ms < 1000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        h.vocabulary(V::TeachStop {
+            token: token.clone()
+        })
+        .await
+        .ok
+    );
+    assert!(h.wait_for(Phase::Idle).await.status.teaching);
+    let reply = h
+        .vocabulary(V::TeachPoll {
+            token: token.clone(),
+        })
+        .await;
+    let preview = reply.vocabulary.unwrap().preview.unwrap();
+    assert_eq!(preview.heard, "Open Isome settings.");
+    assert_eq!(preview.corrected, "Open Aizome settings.");
+    assert!(!h.call(Action::Last).await.ok);
+    assert!(!h.call(Action::PasteLast).await.ok);
+    assert!(!h.clipboard.exists());
+    assert!(!h.vocabulary_root().join("examples").exists());
+    let request = server.await.unwrap();
+    assert!(String::from_utf8_lossy(&request).contains("Aizome, Koe, Sekka"));
+    assert!(
+        !h.vocabulary(V::TeachSave {
+            token: token.clone(),
+            transcript: String::new()
+        })
+        .await
+        .ok
+    );
+    assert!(!h.vocabulary_root().join("examples").exists());
+    assert!(
+        h.vocabulary(V::TeachSave {
+            token,
+            transcript: "Open Aizome settings.".into()
+        })
+        .await
+        .ok
+    );
+    assert!(!h.call(Action::Status).await.status.teaching);
+    let store = koe::vocabulary::Store::new(h.vocabulary_root());
+    let examples = store.list_examples("sekka", "aizome").unwrap();
+    assert_eq!(examples.len(), 1);
+    let data: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            h.vocabulary_root()
+                .join("examples")
+                .join(&examples[0].id)
+                .join("example.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["transcript"], "Open Aizome settings.");
+    assert_eq!(data["model"], "http:whisper-1");
+    assert_eq!(data["sample_rate"], 16000);
+    assert!(!h.clipboard.exists());
+    assert!(!h.call(Action::Last).await.ok);
+}
+
+#[tokio::test]
+async fn abandoned_and_cancelled_teaching_never_saves_audio() {
+    let h = Harness::start("http://127.0.0.1:9/inference".into(), None).await;
+    let start = || V::TeachStart {
+        token: "lease-owner".into(),
+        pack: "sekka".into(),
+        word: "aizome".into(),
+    };
+    assert!(h.vocabulary(start()).await.ok);
+    assert!(
+        h.vocabulary(V::TeachCancel {
+            token: "lease-owner".into()
+        })
+        .await
+        .ok
+    );
+    assert_eq!(h.call(Action::Status).await.status.phase, Phase::Idle);
+    assert!(!h.vocabulary_root().join("examples").exists());
+    assert!(h.vocabulary(start()).await.ok);
+    tokio::time::timeout(Duration::from_secs(11), async {
+        while h.call(Action::Status).await.status.teaching {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.call(Action::Status).await.status.phase, Phase::Idle);
+    assert!(!h.vocabulary_root().join("examples").exists());
+    assert!(
+        !h.vocabulary(V::TeachSave {
+            token: "lease-owner".into(),
+            transcript: "Never retained".into()
+        })
+        .await
+        .ok
+    );
+}
+
+#[tokio::test]
+async fn edited_vocabulary_applies_to_next_dictation_without_restart() {
+    let (endpoint, server) =
+        http_server(Duration::ZERO, r#"{"text":"Open Aizoma settings."}"#).await;
+    let h = Harness::start(endpoint, None).await;
+    let mut library = h
+        .vocabulary(V::Library)
+        .await
+        .vocabulary
+        .unwrap()
+        .library
+        .unwrap();
+    library.packs[1].words[0].aliases.push("Aizoma".into());
+    assert!(h.vocabulary(V::SaveLibrary { library }).await.ok);
+    h.record_audio().await;
+    assert!(h.call(Action::Stop).await.ok);
+    h.wait_for(Phase::Idle).await;
+    assert_eq!(
+        h.call(Action::Last).await.text.unwrap(),
+        "Open Aizome settings."
+    );
+    assert!(!h.vocabulary_root().join("examples").exists());
+    server.await.unwrap();
+}
+
+#[cfg(feature = "ui")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_window_records_reviews_saves_and_exports() {
+    use aizome_kit::{
+        prelude::*,
+        sidestep_ui::{Key, Modifiers},
+        testing::Harness as Window,
+    };
+    use koe::ui::{Msg, VocabularyWindow};
+    // Pump the real toolkit's worker replies without synthesizing host input.
+    async fn settle(ui: &mut Window<VocabularyWindow>, button: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                ui.advance(Duration::from_millis(20));
+                ui.resize(ui.window(), Size::new(960.0, 740.0));
+                if ui.inspected(ui.window()).iter().any(|node| {
+                    node["role"] == "button"
+                        && node["text"] == button
+                        && node["disabled"] != true
+                        && node["visible"] == true
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("button never became ready: {button}"));
+    }
+    let (endpoint, server) =
+        http_server(Duration::ZERO, r#"{"text":"Open Aizoma settings."}"#).await;
+    let h = Harness::start(endpoint, None).await;
+    let mut ui = Window::new(VocabularyWindow::new(h.socket.clone()));
+    let window = ui.window();
+    settle(&mut ui, "Record example").await;
+    assert!(
+        ui.texts(window)
+            .iter()
+            .any(|t| t.contains("next dictation"))
+    );
+    if let Some(dir) = std::env::var_os("KOE_TEST_SCREENSHOTS") {
+        ui.save_png(window, PathBuf::from(dir).join("koe-vocabulary.png"), 1.0);
+    }
+    assert!(ui.click_text(window, "Record example"));
+    settle(&mut ui, "Stop recording").await;
+    assert!(h.call(Action::Status).await.status.teaching);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while h.call(Action::Status).await.status.elapsed_ms < 1000 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(ui.click_text(window, "Stop recording"));
+    h.wait_for(Phase::Idle).await;
+    settle(&mut ui, "Save example").await;
+    assert!(
+        ui.texts(window)
+            .iter()
+            .any(|t| t == "Open Aizoma settings.")
+    );
+    // Editing through the actual text widget preserves the complete utterance.
+    let editor = ui.find_id(window, "correct-transcript").unwrap();
+    ui.click(window, editor.center());
+    ui.key(window, Key::Character("a".into()), Modifiers::SUPER);
+    ui.type_text(window, "Open Aizome settings.");
+    assert!(ui.click_text(window, "Add correction: Aizoma → Aizome"));
+    settle(&mut ui, "Save example").await;
+    let store = koe::vocabulary::Store::new(h.vocabulary_root());
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .word("sekka", "aizome")
+            .unwrap()
+            .aliases
+            .contains(&"Aizoma".into())
+    );
+    assert!(!h.vocabulary_root().join("examples").exists());
+    assert!(ui.click_text(window, "Play sample"));
+    settle(&mut ui, "Save example").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fs::metadata(h._dir.path().join("played.raw")).map_or(0, |m| m.len()) != 32000 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if let Some(dir) = std::env::var_os("KOE_TEST_SCREENSHOTS") {
+        ui.save_png(
+            window,
+            PathBuf::from(dir).join("koe-teaching-review.png"),
+            1.0,
+        );
+    }
+    assert!(ui.click_text(window, "Save example"));
+    settle(&mut ui, "Record example").await;
+    assert!(!h.call(Action::Status).await.status.teaching);
+    assert_eq!(store.list_examples("sekka", "aizome").unwrap().len(), 1);
+    let path = h._dir.path().join("sekka.koe.json");
+    ui.send(Msg::ExportTo(Some(path.clone())));
+    settle(&mut ui, "Record example").await;
+    assert!(path.exists());
+    assert!(
+        ui.texts(window)
+            .iter()
+            .any(|t| t.contains("No recordings are included"))
+    );
+    assert!(!h.clipboard.exists());
+    server.await.unwrap();
 }
 #[tokio::test]
 async fn complete_dictation_pause_resume_last_and_shutdown() {
@@ -275,6 +554,7 @@ async fn protocol_limits_single_instance_and_stale_socket() {
         &Request {
             action: Action::Status,
             version: 999,
+            vocabulary: None,
         },
     )
     .await

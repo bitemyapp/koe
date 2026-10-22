@@ -10,8 +10,9 @@ small session service. Whisper inference is embedded through `whisper-rs`
 and whisper.cpp; there is no Python runtime or separate inference server
 in the default configuration.
 
-- **Local by default.** Microphone audio stays in memory; no recordings,
-  transcript history, telemetry, or automatic model downloads.
+- **Local by default.** Ordinary dictation stays in memory. Teaching recordings
+  are saved only when you explicitly choose Save example. No telemetry or
+  automatic model downloads.
 - **Native Aizome input.** Paste uses the compositor's IPC with ❖V for native
   apps, Ctrl+Shift+V for terminals, and Ctrl+V for other applications.
   Focus and lock checks prevent delivery to a different window during
@@ -22,6 +23,9 @@ in the default configuration.
 - **Local models and vocabulary.** Multilingual Whisper, translation to
   English, language selection, prompts, literal word overrides, resident
   model reuse, explicit unloading, and pinned SHA-256 model downloads.
+- **Native vocabulary teaching.** Enable and share vocabulary packs, approve
+  misheard spellings, and record reviewed examples for future training in an
+  Aizome Kit window. Vocabulary and training data have separate exports.
 - **Ready for the shell.** Versioned Unix-socket control and event-driven
   status with microphone levels, a system tray with recording controls,
   native Aizome notifications, desktop
@@ -92,8 +96,10 @@ nix run github:bitemyapp/koe -- record toggle
 
 ## Build from source
 
-Linux, Rust 1.88+, a C/C++ toolchain and CMake are required. At runtime,
-install PipeWire's `pw-record` and `wl-clipboard`. `wtype` is needed only
+Linux, Rust 1.95+, a C/C++ toolchain and CMake are required. At runtime,
+install PipeWire's `pw-record`/`pw-play`, `wl-clipboard`, Fontconfig and Wayland.
+The default build includes the native Aizome Kit interface; `--no-default-features
+--features local` omits it. `wtype` is needed only
 for automatic paste on other Wayland desktops; those compositors must
 support its virtual-keyboard protocol.
 
@@ -220,6 +226,64 @@ Models live under `$XDG_DATA_HOME/aizome/koe/models` (normally
 Downloading another model does not change `engine.model`. Other compatible
 GGML Whisper models can be selected by path.
 
+## Vocabulary and teaching
+
+Open **Vocabulary and teaching…** from Koe's tray menu, use the desktop
+launcher's Vocabulary action, or run `koe vocabulary`. It starts the daemon
+if necessary. Packs can be enabled together; changes apply to the next
+dictation without restarting or reloading the model. Active written forms
+provide recognition hints, and approved corrections replace whole words,
+ignoring case. They are not acoustic training and cannot guarantee recognition.
+
+The starter **Sekka** pack contains Aizome, Sekka and Koe, including the reported
+`Isome` and `IZOMA` → `Aizome` corrections. **Personal** starts empty.
+Add a written form, enter any known mishearings separated by semicolons, and
+choose **Save word**. Conflicting active corrections are rejected. Disable a
+pack to remove its hints and corrections. The first version applies enabled
+packs across the desktop; it does not yet select packs by application.
+
+To teach a word:
+
+1. Select the saved word and press **Record example**. Say it in a short sentence.
+2. Press **Stop recording**, then review the raw recognition. **Play sample**
+   plays the recording without writing a temporary audio file.
+3. Edit the **complete sentence** to match what you actually said. An isolated
+   word correction may offer an **Add correction** button; approving it changes
+   future dictation immediately, independently of saving the example.
+4. Choose **Save example** to retain the audio and corrected transcript for
+   future training, or **Discard** to erase the pending example. Closing the
+   window also discards it. Teaching never pastes into another application.
+
+Examples are limited to 30 seconds and remain in memory until explicitly saved.
+An abandoned window loses its session after eight seconds without a heartbeat.
+No fine-tuning or adapters run yet. Saving an example alone does not change
+model weights or create an approved correction.
+
+**Export pack…** creates a portable `.koe.json` file containing only names,
+written forms and approved corrections. Imported packs start disabled so you
+can review them before activation. If a changed pack's ID already exists, Koe
+imports a separate copy without overwriting yours. **Export training data…** is a separate,
+explicit export of that pack's saved WAV recordings and complete transcripts
+to a new folder. Do not use that export when you intend to share vocabulary only.
+Delete saved examples from the window before removing their word or pack.
+
+The CLI offers the same pack operations:
+
+```sh
+koe packs list
+koe packs export sekka ~/sekka.koe.json
+koe packs import ~/my-domain.koe.json
+koe packs enable PACK_ID
+koe packs disable PACK_ID
+koe packs export-examples sekka ~/sekka-training
+```
+
+Exports require new paths and do not overwrite existing files. Vocabulary and
+saved examples live in `$XDG_DATA_HOME/aizome/koe/vocabulary` with private
+directory/file permissions. Training exports contain mono 16 kHz PCM WAV files
+and a `manifest.jsonl` with labels, raw recognition, model/language, vocabulary
+revision, duration, timestamps and audio checksums. See [the data format](docs/vocabulary.md).
+
 ## Configuration and privacy
 
 Koe reads `$XDG_CONFIG_HOME/aizome/koe.toml` (normally
@@ -238,9 +302,10 @@ Clipboard contents are replaced on successful delivery and are not restored;
 your desktop clipboard history may retain them. `none` leaves text only in
 Koe's memory for explicit retrieval.
 
-Audio is capped and held in process memory. The last successful transcript
-is held in memory until replaced, cleared, or the daemon exits. Neither is
-written to disk by Koe. Memory may be swapped by the OS. The supplied service
+Ordinary dictation audio is capped and held in process memory. The last successful
+transcript is held in memory until replaced, cleared, or the daemon exits. Neither
+is written to disk by Koe. The teaching window saves recordings and corrected
+transcripts only after **Save example**. Memory may be swapped by the OS. The supplied service
 disables core dumps. Status subscribers and notifications receive no transcript
 text. No Enter key is synthesized.
 

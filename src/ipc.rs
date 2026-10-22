@@ -45,10 +45,25 @@ pub async fn write_json<W: AsyncWrite + Unpin, T: Serialize>(
     Ok(())
 }
 pub async fn request(path: &Path, request: &Request) -> Result<Response> {
-    exchange(path, request).await
+    let timeout = if matches!(
+        request.vocabulary,
+        Some(crate::protocol::VocabularyRequest::ExportExamples { .. })
+    ) {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(5)
+    };
+    exchange_with_timeout(path, request, timeout).await
 }
 pub async fn exchange<T: Serialize, R: DeserializeOwned>(path: &Path, value: &T) -> Result<R> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    exchange_with_timeout(path, value, Duration::from_secs(5)).await
+}
+async fn exchange_with_timeout<T: Serialize, R: DeserializeOwned>(
+    path: &Path,
+    value: &T,
+    timeout: Duration,
+) -> Result<R> {
+    tokio::time::timeout(timeout, async {
         let mut stream = UnixStream::connect(path).await.with_context(|| {
             format!(
                 "cannot connect to {}; is the service running?",

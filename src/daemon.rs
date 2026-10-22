@@ -4,8 +4,12 @@ use crate::{
     desktop,
     engine::Recognizer,
     ipc::{self, SocketGuard},
-    protocol::{Action, Phase, Request, Response, Status, VERSION},
+    protocol::{
+        Action, Phase, Request, Response, Status, TeachingPreview, VERSION, VocabularyReply,
+        VocabularyRequest,
+    },
     text::Processor,
+    vocabulary::{self, Store},
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -25,6 +29,16 @@ use tokio::{
 };
 
 type Command = (Request, oneshot::Sender<Response>, oneshot::Receiver<()>);
+struct Teaching {
+    token: String,
+    pack: String,
+    word: String,
+    spelling: String,
+    revision: u64,
+    samples: Vec<f32>,
+    preview: Option<TeachingPreview>,
+    heartbeat: Instant,
+}
 struct State {
     config: Config,
     status: Status,
@@ -41,6 +55,10 @@ struct State {
     target: Option<u64>,
     reported_phase: Phase,
     transcription_started: Option<Instant>,
+    store: Store,
+    session_prompt: String,
+    teaching: Option<Teaching>,
+    playback: Option<JoinHandle<Result<()>>>,
 }
 impl State {
     fn publish(&mut self) {
@@ -53,6 +71,7 @@ impl State {
         self.status.sequence += 1;
         self.status.has_last = self.last.is_some();
         self.status.model_loaded = self.recognizer.loaded();
+        self.status.teaching = self.teaching.is_some();
         self.updates.send_replace(self.status.clone());
     }
     fn fail(&mut self, error: anyhow::Error) {
@@ -62,19 +81,24 @@ impl State {
         eprintln!("Koe: {message}");
         self.status.error = Some(message.clone());
         self.samples.clear();
-        if self.config.output.notify {
+        if self.config.output.notify && self.teaching.is_none() {
             desktop::notify("Dictation needs attention", message);
         }
         self.publish();
     }
     fn begin_capture(&mut self) -> Result<()> {
         let (tx, rx) = mpsc::channel(4);
-        let remaining = self.config.audio.max_seconds as usize * audio::RATE - self.samples.len();
+        let mut audio = self.config.audio.clone();
+        if self.teaching.is_some() {
+            audio.max_seconds = audio.max_seconds.min(vocabulary::MAX_CLIP_SECONDS);
+            audio.silence_seconds = 0.0;
+        }
+        let remaining = audio.max_seconds as usize * audio::RATE - self.samples.len();
         ensure!(
             remaining > 0,
             "recording has reached audio.max_seconds; stop to transcribe"
         );
-        self.capture = Some(Capture::start(self.config.audio.clone(), remaining, tx)?);
+        self.capture = Some(Capture::start(audio, remaining, tx)?);
         self.meter_rx = rx;
         self.status.phase = Phase::Recording;
         self.status.error = None;
@@ -98,7 +122,10 @@ impl State {
             "no speech detected; check microphone level"
         );
         let samples = std::mem::take(&mut self.samples);
-        let recognizer = self.recognizer.clone();
+        if let Some(teaching) = &mut self.teaching {
+            teaching.samples = samples.clone();
+        }
+        let recognizer = self.recognizer.with_prompt(self.session_prompt.clone());
         self.cancelled = Arc::new(AtomicBool::new(false));
         let cancel = self.cancelled.clone();
         self.transcription_started = Some(Instant::now());
@@ -107,7 +134,7 @@ impl State {
             recognizer.transcribe(samples, cancel).await
         }));
         self.status.phase = Phase::Transcribing;
-        if self.config.output.notify {
+        if self.config.output.notify && self.teaching.is_none() {
             desktop::notify(
                 "Transcribing",
                 "Recording stopped. Turning your speech into text…",
@@ -125,10 +152,132 @@ impl State {
         }
         let _ = self.stop_capture().await;
         self.samples.clear();
+        self.teaching = None;
+        if let Some(task) = self.playback.take() {
+            task.abort();
+        }
         self.status.phase = Phase::Idle;
         self.status.error = None;
         self.status.elapsed_ms = 0;
         self.status.level = 0.0;
+    }
+    fn prepare_vocabulary(&mut self) -> Result<()> {
+        let pipeline = self.store.load()?.pipeline(
+            &self.config.engine.prompt,
+            &self.config.replacements,
+            self.config.output.append_space,
+        )?;
+        self.session_prompt = pipeline.prompt;
+        self.processor = pipeline.processor;
+        Ok(())
+    }
+
+    async fn vocabulary(&mut self, request: VocabularyRequest) -> Result<VocabularyReply> {
+        use VocabularyRequest as V;
+        let mut reply = VocabularyReply::default();
+        if let V::TeachStart { token, pack, word } = request {
+            vocabulary::valid_id(&token)?;
+            ensure!(
+                self.teaching.is_none() && matches!(self.status.phase, Phase::Idle | Phase::Error),
+                "finish or cancel the current recording first"
+            );
+            let library = self.store.load()?;
+            let spelling = library.word(&pack, &word)?.spelling.clone();
+            self.prepare_vocabulary()?;
+            self.samples.clear();
+            self.status.elapsed_ms = 0;
+            self.target = None;
+            self.teaching = Some(Teaching {
+                token,
+                pack,
+                word,
+                spelling,
+                revision: library.revision,
+                samples: vec![],
+                preview: None,
+                heartbeat: Instant::now(),
+            });
+            if let Err(error) = self.begin_capture() {
+                self.teaching = None;
+                return Err(error);
+            }
+            return Ok(reply);
+        }
+        let token = match &request {
+            V::TeachStop { token }
+            | V::TeachPoll { token }
+            | V::TeachCancel { token }
+            | V::TeachSave { token, .. }
+            | V::TeachPlay { token } => token,
+            _ => bail!("not a teaching command"),
+        };
+        ensure!(
+            self.teaching.as_ref().is_some_and(|t| t.token == *token),
+            "teaching session ended; record a new example"
+        );
+        self.teaching.as_mut().unwrap().heartbeat = Instant::now();
+        match request {
+            V::TeachStop { .. } => {
+                self.command(Action::Stop).await?;
+            }
+            V::TeachCancel { .. } => self.cancel().await,
+            V::TeachPoll { .. } => reply.preview = self.teaching.as_ref().unwrap().preview.clone(),
+            V::TeachSave { transcript, .. } => {
+                ensure!(
+                    self.status.phase == Phase::Idle,
+                    "wait for recognition to finish"
+                );
+                let teaching = self.teaching.as_ref().unwrap();
+                let preview = teaching
+                    .preview
+                    .as_ref()
+                    .context("record an example first")?;
+                self.store.save_example(
+                    vocabulary::Example {
+                        version: 1,
+                        id: vocabulary::new_id()?,
+                        pack_id: teaching.pack.clone(),
+                        word_id: teaching.word.clone(),
+                        spelling: teaching.spelling.clone(),
+                        transcript: transcript.trim().into(),
+                        heard: preview.heard.clone(),
+                        model: match self.config.engine.backend {
+                            crate::config::Backend::Local => self
+                                .config
+                                .engine
+                                .model
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            crate::config::Backend::Http => {
+                                format!("http:{}", self.config.engine.http.model)
+                            }
+                        },
+                        language: self.config.engine.language.clone(),
+                        vocabulary_revision: teaching.revision,
+                        created_ms: 0,
+                        sample_rate: 0,
+                        duration_ms: 0,
+                        audio_sha256: String::new(),
+                    },
+                    &teaching.samples,
+                )?;
+                self.cancel().await;
+                reply.message = Some("Example saved locally for future training.".into());
+            }
+            V::TeachPlay { .. } => {
+                let teaching = self.teaching.as_ref().unwrap();
+                ensure!(teaching.preview.is_some(), "wait for recognition to finish");
+                if let Some(task) = self.playback.take() {
+                    task.abort();
+                }
+                let samples = teaching.samples.clone();
+                self.playback = Some(tokio::spawn(async move { audio::play(&samples).await }));
+            }
+            _ => unreachable!(),
+        }
+        Ok(reply)
     }
     async fn command(&mut self, action: Action) -> Result<Option<String>> {
         let action = if action == Action::Toggle {
@@ -152,9 +301,14 @@ impl State {
         match action {
             Action::Start => {
                 ensure!(
+                    self.teaching.is_none(),
+                    "save or discard the teaching example first"
+                );
+                ensure!(
                     matches!(self.status.phase, Phase::Idle | Phase::Error),
                     "dictation is already active"
                 );
+                self.prepare_vocabulary()?;
                 self.samples.clear();
                 self.status.elapsed_ms = 0;
                 self.target = if desktop::uses_aizome(&self.config.output)
@@ -218,7 +372,8 @@ impl State {
             }
             Action::PasteLast => {
                 ensure!(
-                    matches!(self.status.phase, Phase::Idle | Phase::Error),
+                    self.teaching.is_none()
+                        && matches!(self.status.phase, Phase::Idle | Phase::Error),
                     "finish or cancel dictation before pasting the last transcript"
                 );
                 let text = self.last.clone().context("no transcript in memory")?;
@@ -244,6 +399,7 @@ impl State {
                 self.recognizer.unload()?;
             }
             Action::Toggle => unreachable!(),
+            Action::Vocabulary => bail!("vocabulary command is required"),
         }
         Ok(None)
     }
@@ -252,6 +408,8 @@ async fn serve(
     stream: UnixStream,
     tx: mpsc::Sender<Command>,
     mut updates: watch::Receiver<Status>,
+    store: Store,
+    config: Arc<Config>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -263,6 +421,24 @@ async fn serve(
         let mut response = Response::status(updates.borrow().clone());
         response.ok = false;
         response.error = Some(format!("unsupported protocol version; expected {VERSION}"));
+        return ipc::write_json(&mut writer, &response).await;
+    }
+    ensure!(
+        (request.action == Action::Vocabulary) == request.vocabulary.is_some(),
+        "invalid vocabulary request"
+    );
+    if let Some(command) = request.vocabulary.as_ref().filter(|v| v.is_store_command()) {
+        let command = command.clone();
+        // Exporting recordings and editing packs must not block microphone controls.
+        let result = tokio::task::spawn_blocking(move || store.dispatch(command, &config)).await?;
+        let mut response = Response::status(updates.borrow().clone());
+        match result {
+            Ok(reply) => response.vocabulary = Some(reply),
+            Err(error) => {
+                response.ok = false;
+                response.error = Some(format!("{error:#}"));
+            }
+        }
         return ipc::write_json(&mut writer, &response).await;
     }
     let subscribe = request.action == Action::Subscribe;
@@ -292,6 +468,8 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
     let (tx, mut commands) = mpsc::channel::<Command>(32);
     let permits = Arc::new(Semaphore::new(64));
     let (_meter_tx, meter_rx) = mpsc::channel(4);
+    let store = Store::user()?;
+    let shared_config = Arc::new(config.clone());
     let mut state = State {
         recognizer: Recognizer::new(config.engine.clone()),
         processor: Processor::new(&config.replacements, config.output.append_space)?,
@@ -308,6 +486,10 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
         target: None,
         reported_phase: Phase::Idle,
         transcription_started: None,
+        store: store.clone(),
+        session_prompt: String::new(),
+        teaching: None,
+        playback: None,
     };
     let tray_task = state.config.tray.enabled.then(|| {
         tokio::spawn(crate::tray::run(
@@ -321,9 +503,21 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
+    let mut teaching_watchdog = tokio::time::interval(Duration::from_secs(1));
+    teaching_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     eprintln!("Koe listening on {}", path.display());
     loop {
         tokio::select! {
+            _ = teaching_watchdog.tick(), if state.teaching.is_some() => {
+                if state.teaching.as_ref().is_some_and(|t| t.heartbeat.elapsed() > Duration::from_secs(8)) {
+                    state.cancel().await;
+                    state.publish();
+                }
+            }
+            result = async { match state.playback.as_mut() { Some(task) => task.await, None => pending().await } } => {
+                state.playback.take();
+                if result.is_err() || result.is_ok_and(|r| r.is_err()) { eprintln!("Koe: teaching playback failed"); }
+            }
             result = async { match warmup.as_mut() { Some(task) => task.await, None => pending().await } } => {
                 warmup.take();
                 match result.context("model warmup task failed").and_then(|v| v) {
@@ -337,15 +531,20 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
             connection = listener.accept() => {
                 let (stream, _) = connection?;
                 if let Ok(permit) = permits.clone().try_acquire_owned() {
-                    let tx = tx.clone(); let rx = rx.clone();
-                    tokio::spawn(async move { let _permit = permit; let _ = serve(stream, tx, rx).await; });
+                    let tx = tx.clone(); let rx = rx.clone(); let store = store.clone(); let config = shared_config.clone();
+                    tokio::spawn(async move { let _permit = permit; let _ = serve(stream, tx, rx, store, config).await; });
                 }
             }
             Some((request, reply, flushed)) = commands.recv() => {
-                let result = state.command(request.action).await;
+                let mut vocabulary = None;
+                let polling = matches!(request.vocabulary, Some(VocabularyRequest::TeachPoll { .. }));
+                let result = if let Some(command) = request.vocabulary {
+                    state.vocabulary(command).await.map(|result| { vocabulary = Some(result); None })
+                } else { state.command(request.action).await };
                 // Read-only polling must not generate events or wake the shell.
-                if !matches!(request.action, Action::Status | Action::Subscribe | Action::Last) { state.publish(); }
+                if !polling && !matches!(request.action, Action::Status | Action::Subscribe | Action::Last) { state.publish(); }
                 let mut response = Response::status(state.status.clone());
+                response.vocabulary = vocabulary;
                 match result {
                     Ok(text) => response.text = text,
                     Err(e) => { response.ok = false; response.error = Some(format!("{e:#}")); }
@@ -380,6 +579,21 @@ pub async fn run(config: Config, path: &Path) -> Result<()> {
                 if let Some(ms) = state.status.transcription_ms { eprintln!("Koe: transcription took {ms} ms"); }
                 match result.context("transcription task failed").and_then(|v| v) {
                     Ok(text) => {
+                        if let Some(teaching) = &mut state.teaching {
+                            let corrected = state.processor.apply(&text).trim().to_owned();
+                            if text.len() > 4096 || corrected.len() > 4096 {
+                                state.fail(anyhow::anyhow!("example transcript exceeds 4096 bytes; record a shorter example"));
+                                continue;
+                            }
+                            teaching.preview = Some(TeachingPreview {
+                                corrected, heard: text.trim().into(),
+                                duration_ms: state.status.elapsed_ms,
+                            });
+                            state.status.phase = Phase::Idle;
+                            state.status.error = None;
+                            state.publish();
+                            continue;
+                        }
                         let text = state.processor.apply(&text);
                         if text.trim().is_empty() { state.fail(anyhow::anyhow!("no speech recognized")); continue; }
                         if serde_json::to_vec(&text)?.len() > 48 * 1024 { state.fail(anyhow::anyhow!("encoded transcript exceeds 48 KiB")); continue; }

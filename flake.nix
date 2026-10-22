@@ -32,7 +32,8 @@
       });
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ cargo rustc rustfmt clippy cmake pkg-config pipewire wl-clipboard wtype ];
+          packages = with pkgs; [ cargo rustc rustfmt clippy cmake pkg-config pipewire wl-clipboard wtype fontconfig wayland ];
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.fontconfig pkgs.wayland ];
           WHISPER_DONT_GENERATE_BINDINGS = "1";
         };
       });

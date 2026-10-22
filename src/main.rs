@@ -35,6 +35,13 @@ enum Command {
     },
     /// Show the tray, starting the daemon if necessary. Does not record.
     Launch,
+    /// Open the native vocabulary and teaching window.
+    Vocabulary,
+    /// Manage shareable vocabulary packs without opening a window.
+    Packs {
+        #[command(subcommand)]
+        command: PackCommand,
+    },
     /// Control dictation; start/stop can be bound to press/release for push-to-talk.
     Record {
         #[arg(value_enum)]
@@ -73,6 +80,15 @@ enum ConfigCommand {
     Init,
 }
 #[derive(Subcommand)]
+enum PackCommand {
+    List,
+    Import { path: PathBuf },
+    Export { id: String, path: PathBuf },
+    Enable { id: String },
+    Disable { id: String },
+    ExportExamples { id: String, path: PathBuf },
+}
+#[derive(Subcommand)]
 enum ModelCommand {
     List,
     Download {
@@ -109,6 +125,72 @@ async fn run() -> Result<()> {
             koe::daemon::run(config, &socket()?).await?;
         }
         Command::Launch => launch(&path, &socket()?, use_service).await?,
+        Command::Vocabulary => {
+            #[cfg(feature = "ui")]
+            {
+                let socket = socket()?;
+                launch(&path, &socket, use_service).await?;
+                koe::ui::run(socket)?;
+            }
+            #[cfg(not(feature = "ui"))]
+            anyhow::bail!(
+                "native vocabulary window is not compiled in; build with --features ui or use koe packs"
+            );
+        }
+        Command::Packs { command } => {
+            use koe::protocol::VocabularyRequest as V;
+            let socket = socket()?;
+            let mut response = ipc::request(&socket, &Request::vocabulary(V::Library)).await?;
+            ensure!(
+                response.ok,
+                "{}",
+                response.error.as_deref().unwrap_or("cannot load packs")
+            );
+            let mut library = response
+                .vocabulary
+                .as_mut()
+                .and_then(|v| v.library.take())
+                .context("daemon has no vocabulary support")?;
+            let command = match command {
+                PackCommand::List => {
+                    println!("{}", serde_json::to_string_pretty(&library)?);
+                    return Ok(());
+                }
+                PackCommand::Import { path } => V::Import {
+                    path: std::path::absolute(path)?,
+                    revision: library.revision,
+                },
+                PackCommand::Export { id, path } => V::Export {
+                    pack: id,
+                    path: std::path::absolute(path)?,
+                },
+                PackCommand::ExportExamples { id, path } => V::ExportExamples {
+                    pack: id,
+                    path: std::path::absolute(path)?,
+                },
+                PackCommand::Enable { id } => {
+                    ensure!(library.packs.iter().any(|p| p.id == id), "unknown pack ID");
+                    if !library.enabled.contains(&id) {
+                        library.enabled.push(id);
+                    }
+                    V::SaveLibrary { library }
+                }
+                PackCommand::Disable { id } => {
+                    library.enabled.retain(|p| p != &id);
+                    V::SaveLibrary { library }
+                }
+            };
+            let response = ipc::request(&socket, &Request::vocabulary(command)).await?;
+            ensure!(
+                response.ok,
+                "{}",
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or("vocabulary request failed")
+            );
+            println!("{}", serde_json::to_string_pretty(&response.vocabulary)?);
+        }
         Command::Status => control(&socket()?, Action::Status).await?,
         Command::Record {
             action: Action::Subscribe,
@@ -121,15 +203,16 @@ async fn run() -> Result<()> {
                 config.engine.model = model;
             }
             let samples = koe::audio::read_wav(&input, config.audio.max_seconds)?;
-            let engine = koe::engine::Recognizer::new(config.engine);
+            let pipeline = koe::vocabulary::Store::user()?.load()?.pipeline(
+                &config.engine.prompt,
+                &config.replacements,
+                config.output.append_space,
+            )?;
+            let engine = koe::engine::Recognizer::new(config.engine).with_prompt(pipeline.prompt);
             let text = engine
                 .transcribe(samples, Arc::new(AtomicBool::new(false)))
                 .await?;
-            println!(
-                "{}",
-                koe::text::Processor::new(&config.replacements, config.output.append_space)?
-                    .apply(&text)
-            );
+            println!("{}", pipeline.processor.apply(&text));
         }
         Command::Config { command } => match command {
             ConfigCommand::Show => print!("{}", toml::to_string_pretty(&Config::load(&path)?)?),

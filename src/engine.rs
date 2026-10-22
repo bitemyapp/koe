@@ -14,8 +14,13 @@ use std::sync::{
 pub struct Recognizer {
     config: Engine,
     #[cfg(feature = "local")]
-    context: Arc<Mutex<Option<whisper_rs::WhisperState>>>,
+    context: Arc<Mutex<Option<Resident>>>,
     loaded: Arc<AtomicBool>,
+}
+#[cfg(feature = "local")]
+struct Resident {
+    model: whisper_rs::WhisperContext,
+    state: whisper_rs::WhisperState,
 }
 
 #[cfg(feature = "local")]
@@ -39,6 +44,12 @@ impl Recognizer {
     }
     pub fn loaded(&self) -> bool {
         self.loaded.load(Ordering::Relaxed)
+    }
+    /// Per-utterance vocabulary changes reuse the resident weights and buffers.
+    pub fn with_prompt(&self, prompt: String) -> Self {
+        let mut recognizer = self.clone();
+        recognizer.config.prompt = prompt;
+        recognizer
     }
     /// Prepare model buffers and GPU pipelines before the first dictation.
     /// Silence is discarded and no_context prevents it entering later prompts.
@@ -112,13 +123,25 @@ impl Recognizer {
                 params,
             )
             .context("cannot load Whisper model")?;
-            *context = Some(loaded.create_state()?);
+            *context = Some(Resident {
+                state: loaded.create_state()?,
+                model: loaded,
+            });
             self.loaded.store(true, Ordering::Relaxed);
         }
         ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
         // Keep the inference state resident as well as the weights. Recreating
         // it on every utterance repeats GPU allocation and pipeline setup.
-        let state = context.as_mut().unwrap();
+        let resident = context.as_mut().unwrap();
+        let hint_limit = resident.model.n_text_ctx() as usize / 2;
+        let tokens = resident
+            .model
+            .tokenize(&self.config.prompt, self.config.prompt.len() + 1)?;
+        ensure!(
+            tokens.len() <= hint_limit,
+            "vocabulary and engine.prompt exceed Whisper's {hint_limit}-token hint limit; disable a pack or shorten its words"
+        );
+        let state = &mut resident.state;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.config.threads as i32);
         params.set_language(if self.config.language == "auto" {

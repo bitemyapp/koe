@@ -16,6 +16,14 @@ struct Tray {
 
 impl Tray {
     fn label(&self) -> &'static str {
+        if self.status.teaching {
+            return match self.status.phase {
+                Phase::Recording => "Recording teaching example",
+                Phase::Transcribing => "Checking teaching example",
+                Phase::Idle => "Review example — microphone off",
+                _ => "Teaching — needs attention",
+            };
+        }
         match self.status.phase {
             Phase::Idle => "Ready",
             Phase::Recording => "Listening",
@@ -92,7 +100,7 @@ impl ksni::Tray for Tray {
         let phase = self.status.phase;
         let idle = matches!(phase, Phase::Idle | Phase::Error);
         let recording = matches!(phase, Phase::Recording | Phase::Paused);
-        vec![
+        let mut menu = vec![
             StandardItem {
                 label: self.title(),
                 enabled: false,
@@ -107,7 +115,7 @@ impl ksni::Tray for Tray {
                     "Start dictation"
                 },
                 Action::Toggle,
-                idle || recording,
+                !self.status.teaching && (idle || recording),
             ),
             self.item(
                 if phase == Phase::Paused {
@@ -120,16 +128,18 @@ impl ksni::Tray for Tray {
                 } else {
                     Action::Pause
                 },
-                recording,
+                recording && !self.status.teaching,
             ),
             self.item(
-                if phase == Phase::Error {
+                if self.status.teaching {
+                    "Discard teaching example"
+                } else if phase == Phase::Error {
                     "Dismiss error"
                 } else {
                     "Cancel dictation"
                 },
                 Action::Cancel,
-                phase != Phase::Idle,
+                phase != Phase::Idle || self.status.teaching,
             ),
             ksni::MenuItem::Separator,
             self.item(
@@ -149,7 +159,14 @@ impl ksni::Tray for Tray {
             ),
             ksni::MenuItem::Separator,
             self.item("Quit Koe", Action::Shutdown, true),
-        ]
+        ];
+        if cfg!(feature = "ui") {
+            menu.insert(
+                menu.len() - 2,
+                self.item("Vocabulary and teaching…", Action::Vocabulary, true),
+            );
+        }
+        menu
     }
 }
 
@@ -224,7 +241,8 @@ pub async fn run(path: PathBuf, mut updates: watch::Receiver<Status>, notify: bo
                 let status = updates.borrow_and_update().clone();
                 // Meter updates are 10 Hz; SNI only needs state changes.
                 if previous.phase == status.phase && previous.has_last == status.has_last
-                    && previous.model_loaded == status.model_loaded && previous.error == status.error {
+                    && previous.model_loaded == status.model_loaded && previous.error == status.error
+                    && previous.teaching == status.teaching {
                     continue;
                 }
                 previous = status.clone();
@@ -236,6 +254,16 @@ pub async fn run(path: PathBuf, mut updates: watch::Receiver<Status>, notify: bo
             Some(action) = commands.recv() => {
                 // Let the shell dismiss the menu and restore application focus.
                 tokio::time::sleep(Duration::from_millis(200)).await;
+                if action == Action::Vocabulary {
+                    let result = std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| {
+                        std::process::Command::new(exe).arg("--socket").arg(&path).arg("vocabulary")
+                            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).spawn()
+                            .map(|mut child| { std::thread::spawn(move || { let _ = child.wait(); }); })
+                            .map_err(anyhow::Error::from)
+                    });
+                    if let Err(error) = result { handle.update(|tray| tray.error = Some(format!("Cannot open vocabulary: {error}"))).await; }
+                    continue;
+                }
                 let result = ipc::request(&path, &Request::new(action)).await;
                 let error = match result {
                     Ok(response) if response.ok => None,

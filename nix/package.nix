@@ -1,13 +1,17 @@
-{ lib, rustPlatform, cmake, pkg-config, makeWrapper, openblas, vulkan-headers, vulkan-loader, shaderc, pipewire, wl-clipboard, wtype, src, vulkanSupport ? false }:
+{ lib, rustPlatform, cmake, pkg-config, makeWrapper, openblas, fontconfig, wayland, vulkan-headers, vulkan-loader, shaderc, pipewire, wl-clipboard, wtype, src, vulkanSupport ? false }:
 rustPlatform.buildRustPackage {
   pname = "aizome-koe";
   version = "0.1.0";
   inherit src;
   cargoLock.lockFile = ../Cargo.lock;
+  cargoLock.outputHashes = {
+    "aizome-kit-0.1.0" = "sha256-cwpWQM14Dyby+njXfqkg2x+KZhTIwK4yxQ3y39AD7kQ=";
+    "sidestep-ui-0.0.1" = "sha256-HGpKhuaSNMl8tmy39RKd/ZQbw2X27OaIcSp7S/nl8I4=";
+  };
   nativeBuildInputs = [ cmake pkg-config makeWrapper ] ++ lib.optionals vulkanSupport [ shaderc rustPlatform.bindgenHook ];
   # OpenBLAS selects optimized kernels for the current CPU at runtime;
   # the rest of whisper.cpp stays portable to baseline CPUs.
-  buildInputs = [ openblas ] ++ lib.optionals vulkanSupport [ vulkan-headers vulkan-loader ];
+  buildInputs = [ openblas fontconfig wayland ] ++ lib.optionals vulkanSupport [ vulkan-headers vulkan-loader ];
   buildFeatures = [ "openblas" ] ++ lib.optional vulkanSupport "vulkan";
   BLAS_INCLUDE_DIRS = "${lib.getDev openblas}/include";
   OPENBLAS_PATH = "${lib.getLib openblas}";
@@ -25,7 +29,7 @@ rustPlatform.buildRustPackage {
     patchShebangs tests
   '';
   postInstall = ''
-    wrapProgram $out/bin/koe --prefix PATH : ${lib.makeBinPath [ pipewire wl-clipboard wtype ]}
+    wrapProgram $out/bin/koe --prefix PATH : ${lib.makeBinPath [ pipewire wl-clipboard wtype ]} --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ fontconfig wayland ]}
     install -Dm644 data/aizome-koe.service $out/lib/systemd/user/aizome-koe.service
     substituteInPlace $out/lib/systemd/user/aizome-koe.service --replace-fail 'ExecStart=koe daemon' "ExecStart=$out/bin/koe daemon"
     install -Dm644 data/org.aizome.Koe.desktop $out/share/applications/org.aizome.Koe.desktop

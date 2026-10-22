@@ -90,6 +90,26 @@ KOE_TEST_WAV=/tmp/koe-smoke/jfk.wav \
 The unwrapped Nix executable is deliberate: the package's normal wrapper puts
 the real `pw-record` first on PATH, whereas this test supplies a fixture.
 
+Vocabulary tests check pack import/export, inactive imports, conflicting aliases,
+stale edits, bounded input, private permissions, WAV labels and checksums, deletion,
+and the separation of vocabulary from training exports. Daemon tests exercise
+explicit save, discard, lease expiry, token ownership, next-dictation reload,
+and verify that teaching never writes the clipboard or ordinary last transcript.
+They also verify that ordinary dictation creates no saved training audio.
+
+The native Aizome Kit harness drives the real window against an isolated daemon:
+Record → Stop → edit the complete sentence → approve a correction → Save →
+export. The model server and microphone are fixtures. To render its ordinary and
+review states for inspection, set an existing output directory:
+
+```sh
+KOE_TEST_SCREENSHOTS=/tmp cargo test --test daemon native_window -- --nocapture
+```
+
+This writes `koe-vocabulary.png` and `koe-teaching-review.png` without opening a
+host window or accessing the login session's keyboard, microphone or clipboard.
+It verifies the UI and data flow, not recognition accuracy for a user's voice.
+
 For a manual session check, first run `koe doctor`. Choose a non-sensitive
 text buffer, start dictation, speak, stop, and observe insertion. Repeat with
 focus changed during recognition: insertion should be refused and

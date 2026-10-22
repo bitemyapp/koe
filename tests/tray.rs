@@ -122,6 +122,7 @@ async fn tray_registers_updates_controls_and_recovers_after_host_restart() -> Re
             .arg(&socket)
             .arg("daemon")
             .env("DBUS_SESSION_BUS_ADDRESS", address)
+            .env("XDG_DATA_HOME", dir.path().join("data"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH")?),

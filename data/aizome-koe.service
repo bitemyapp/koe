@@ -12,7 +12,8 @@ Slice=session.slice
 UMask=0077
 LimitCORE=0
 NoNewPrivileges=true
-PrivateTmp=true
+# Vocabulary imports/exports must see the same file paths as the desktop.
+PrivateTmp=false
 TimeoutStopSec=10
 
 [Install]

@@ -22,7 +22,8 @@ are at most 64 concurrent connections and 32 queued commands.
 ```
 
 Actions: `start`, `stop`, `toggle`, `pause`, `resume`, `cancel`, `status`,
-`subscribe`, `last`, `copy-last`, `paste-last`, `clear-last`, `unload`, `shutdown`.
+`subscribe`, `last`, `copy-last`, `paste-last`, `clear-last`, `unload`, `shutdown`,
+`vocabulary` (with a `vocabulary` command payload).
 Unknown actions and fields are rejected. `shutdown` exits the process; a
 systemd service configured with `Restart=on-failure` stays stopped until started.
 
@@ -36,8 +37,10 @@ or `error`. It is accepted only while idle or in error and can be cancelled.
 On Aizome, delivery waits up to five seconds for held keys to be released,
 checking focus and lock state throughout the wait.
 
-The `last` response adds a `text` string. Other responses and all subscription
-updates omit it. `clear-last` does not clear the desktop clipboard. `cancel`
+The `last` response adds a `text` string. Ordinary responses and all subscription
+updates omit it. Explicit vocabulary/teaching requests can return reviewed text
+in a separate `vocabulary` object; it is never broadcast. `clear-last` does not
+clear the desktop clipboard. `cancel`
 discards the current recording/work and preserves the last recognized text,
 including text retained after failed delivery.
 
@@ -60,3 +63,29 @@ it. A pause closes the microphone before acknowledging the request.
 All interaction is local to the Unix user. The protocol is not a security
 boundary between processes of that user. Consumers should tolerate future
 response fields and report a version mismatch rather than guessing its meaning.
+
+## Vocabulary and teaching
+
+`{"action":"vocabulary","vocabulary":{"command":"library"}}` retrieves the
+library and recognition-location description. `save-library` takes a complete
+`library` including the revision read; stale edits are rejected. Import/export
+and example commands are defined by `VocabularyRequest` in `src/protocol.rs`.
+File paths are absolute local paths, not URLs. Store work runs separately from
+the recording actor. Training export clients allow two minutes for file copies.
+
+`teach-start` takes `token` (a random session owner ID), `pack` and `word`. It
+starts a bounded recording with no paste target. Use `teach-stop` to recognize,
+then `teach-poll` to retrieve `{heard, corrected, duration_ms}`. Each command
+requires the same token. The owner must poll at least every eight seconds while
+recording, recognizing, or reviewing, or the daemon discards the session.
+The native window polls twice a second. `teach-play` plays the in-memory sample;
+`teach-save` takes the complete corrected `transcript` and explicitly persists
+the pair. `teach-cancel`, global `cancel`, shutdown, and lease expiry discard
+unsaved audio. Saving clears the session. These commands never replace the last
+ordinary transcript or write to the clipboard.
+
+`status.teaching` is true throughout this flow, including `phase:idle` during
+review (microphone off). Consumers must not offer a new dictation while teaching
+is true. Subscription snapshots never include a session token, audio, previews,
+vocabulary content or saved examples. See [vocabulary.md](vocabulary.md) for the
+portable pack and explicit training export formats.

@@ -2,7 +2,7 @@
 name = "aizome-koe"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT"
 description = "Koe: local voice dictation for Aizome and Sekka"
 repository = "https://github.com/bitemyapp/koe"
@@ -15,7 +15,8 @@ name = "koe"
 path = "src/main.rs"
 
 [features]
-default = ["local"]
+default = ["local", "ui"]
+ui = ["dep:aizome-kit"]
 local = ["dep:whisper-rs"]
 openblas = ["local", "whisper-rs/openblas"]
 vulkan = ["local", "whisper-rs/vulkan"]
@@ -37,6 +38,15 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
 toml = "0.9"
 whisper-rs = { version = "0.16", optional = true }
+aizome-kit = { git = "https://github.com/bitemyapp/aizome", rev = "e012286df2199d2e8b0fd2e9a951835b2a8a6494", optional = true }
+
+# Aizome uses a workspace path for its native toolkit. Resolve that package
+# from the matching, pinned Sidestep source when consuming the kit standalone.
+[patch."https://github.com/bitemyapp/aizome"]
+sidestep-ui = { git = "https://github.com/bitemyapp/sidestep", rev = "dae957e913376a26e642d6abee533eb755fb9092" }
+
+[profile.dev.package.tiny-skia]
+overflow-checks = false
 
 [profile.release]
 lto = "thin"

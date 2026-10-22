@@ -10,7 +10,11 @@ Keywords=voice;speech;dictation;microphone;
 StartupWMClass=org.aizome.Koe
 DBusActivatable=false
 Terminal=false
-Actions=Dictate;Cancel;CopyLast;ClearLast;
+Actions=Vocabulary;Dictate;Cancel;CopyLast;ClearLast;
+
+[Desktop Action Vocabulary]
+Name=Vocabulary and teaching
+Exec=koe vocabulary
 
 [Desktop Action Dictate]
 Name=Start or Stop Dictation

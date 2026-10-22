@@ -70,6 +70,13 @@ A server selection must clearly say audio is sent to that server. Vocabulary
 prompts and overrides are ordinary user settings, not credentials. Apply
 configuration changes by restarting the service while idle.
 
+Koe's native `koe vocabulary` window uses Aizome Kit and can be opened from
+the tray or a Settei link. Pack changes apply to the next dictation without
+restarting the service. `status.teaching` distinguishes a teaching recording
+or review from ordinary dictation; idle + teaching means microphone off and
+waiting for Save/Discard. Do not offer Start in that state. See
+[vocabulary.md](vocabulary.md) for pack and training-data contracts.
+
 These Deskbar/Settei UI changes are **integration work for their repositories**;
 Koe supplies the working transport and commands, not an unmerged UI patch.
 
@@ -88,10 +95,13 @@ Koe supplies the working transport and commands, not an unmerged UI patch.
 | Shell status/meter stream, Waybar adapter | implemented |
 | System tray status, menu, shell restart recovery | implemented |
 | Vulkan package, resident inference buffers and startup warmup | implemented |
+| Native vocabulary/teaching window, shareable packs | implemented |
+| Explicitly saved recordings and corrected labels for future training | implemented |
+| Acoustic fine-tuning and interchangeable model adapters | not implemented |
 | Graphical setup/settings and animated overlay | not implemented |
 | Parakeet, Qwen, Cohere, ElevenLabs-specific adapters | not implemented |
 | Partial transcript streaming and live typing | not implemented |
-| Audio ducking, neural VAD, persisted recordings | not implemented |
+| Audio ducking, neural VAD, automatic recording history | not implemented |
 | X11, direct global hotkey capture | not implemented |
 
 ## Architecture
