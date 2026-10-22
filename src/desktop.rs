@@ -73,18 +73,7 @@ fn paste_chord(output: &Output, window: &Value) -> &'static str {
         }
     }
 }
-async fn can_paste(target: Option<u64>, guard: bool) -> Result<()> {
-    let input = compositor(json!({"request":"input-state"})).await?;
-    ensure!(
-        input["response"] == "input-state",
-        "unexpected Aizome input response"
-    );
-    ensure!(
-        input["state"]["pressed_keys"]
-            .as_array()
-            .is_some_and(|k| k.is_empty()),
-        "release keyboard modifiers before pasting; use koe record paste-last"
-    );
+async fn check_destination(target: Option<u64>, guard: bool) -> Result<()> {
     let recovery = compositor(json!({"request":"recovery-state"})).await?;
     ensure!(
         recovery["state"]["locked"] == false,
@@ -97,6 +86,24 @@ async fn can_paste(target: Option<u64>, guard: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn wait_for_release(target: Option<u64>, guard: bool) -> Result<()> {
+    // Recognition can finish before the person releases the stop shortcut.
+    // Keep the microphone off and wait asynchronously, so Cancel still works.
+    // Recheck destination on every poll: changing focus or locking must never
+    // turn this into a delayed paste into a different application.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            check_destination(target, guard).await?;
+            let input = compositor(json!({"request":"input-state"})).await?;
+            ensure!(input["response"] == "input-state", "unexpected Aizome input response");
+            let keys = input["state"]["pressed_keys"].as_array()
+                .context("unexpected Aizome pressed keys response")?;
+            if keys.is_empty() { return Ok(()); }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.context("keyboard stayed pressed for 5 seconds; microphone is off and transcript is retained; use koe record paste-last")?
 }
 pub async fn copy(text: &str) -> Result<()> {
     let mut child = Command::new("wl-copy")
@@ -127,7 +134,7 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
     }
     if output.mode == OutputMode::Paste && uses_aizome(output) {
         // Check before changing the clipboard, then again immediately before input.
-        can_paste(target, output.require_same_window).await?;
+        wait_for_release(target, output.require_same_window).await?;
     }
     copy(text).await?;
     if output.mode == OutputMode::Clipboard {
@@ -135,8 +142,12 @@ pub async fn deliver(text: &str, output: &Output, target: Option<u64>) -> Result
     }
     tokio::time::sleep(Duration::from_millis(output.paste_delay_ms)).await;
     if uses_aizome(output) {
+        wait_for_release(target, output.require_same_window).await?;
         let window = focused_window_info().await?;
-        can_paste(target, output.require_same_window).await?;
+        ensure!(
+            !output.require_same_window || window["id"].as_u64() == target,
+            "focused window changed; use koe record paste-last in the intended window"
+        );
         let reply = compositor(
             json!({"request":"synthesize","events":[{"type":"chord","keys":paste_chord(output, &window)}]}),
         )

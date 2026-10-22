@@ -359,6 +359,146 @@ async fn aizome_pastes_terminal_text_and_checks_focus() {
 }
 
 #[tokio::test]
+async fn held_shortcut_waits_for_release_and_remains_cancellable_and_focus_guarded() {
+    #[derive(Default)]
+    struct DesktopState {
+        held: bool,
+        locked: bool,
+        changed_focus: bool,
+        input_reads: usize,
+        pastes: usize,
+    }
+    for outcome in ["release", "cancel", "focus", "lock", "timeout"] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("compositor.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(DesktopState {
+            held: true,
+            ..Default::default()
+        }));
+        let desktop = state.clone();
+        let compositor = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // Cancelling delivery can close a connection before a request
+                // is written or its reply is read.
+                let Some(line) = ipc::read_line(&mut BufReader::new(&mut stream))
+                    .await
+                    .unwrap()
+                else {
+                    continue;
+                };
+                let request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+                let response = {
+                    let mut state = desktop.lock().unwrap();
+                    match request["request"].as_str().unwrap() {
+                        "focused-window" => serde_json::json!({"response":"window","window":{
+                            "id":if state.changed_focus { 8 } else { 7 }, "app_id":"foot", "kit_app":false
+                        }}),
+                        "recovery-state" => {
+                            serde_json::json!({"response":"recovery","state":{"locked":state.locked}})
+                        }
+                        "input-state" => {
+                            state.input_reads += 1;
+                            let keys = if state.held {
+                                vec![125, 56, 32]
+                            } else {
+                                vec![]
+                            };
+                            serde_json::json!({"response":"input-state","state":{"pressed_keys":keys}})
+                        }
+                        "synthesize" => {
+                            assert!(!state.held && !state.locked && !state.changed_focus);
+                            assert_eq!(request["events"][0]["keys"], "ctrl+shift+v");
+                            state.pastes += 1;
+                            serde_json::json!({"response":"ok"})
+                        }
+                        other => panic!("unexpected request {other}"),
+                    }
+                };
+                let _ = ipc::write_json(&mut stream, &response).await;
+            }
+        });
+        let (endpoint, server) =
+            http_server(Duration::ZERO, r#"{"text":"retained transcript"}"#).await;
+        let h = Harness::start(endpoint, Some(&socket)).await;
+        h.record_audio().await;
+        assert!(h.call(Action::Stop).await.ok);
+        h.wait_for(Phase::Delivering).await;
+        // Recognition has finished, but the shortcut is still held.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let waiting = h.call(Action::Status).await.status;
+        assert_eq!(waiting.phase, Phase::Delivering);
+        assert!(waiting.error.is_none() && waiting.has_last);
+        assert!(state.lock().unwrap().input_reads > 0);
+        assert!(!h.clipboard.exists());
+        assert_eq!(state.lock().unwrap().pastes, 0);
+        match outcome {
+            "release" => state.lock().unwrap().held = false,
+            "cancel" => {
+                assert_eq!(h.call(Action::Cancel).await.status.phase, Phase::Idle);
+                state.lock().unwrap().held = false;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            "focus" => state.lock().unwrap().changed_focus = true,
+            "lock" => state.lock().unwrap().locked = true,
+            "timeout" => {
+                tokio::time::timeout(Duration::from_secs(7), async {
+                    while h.call(Action::Status).await.status.phase != Phase::Error {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        if matches!(outcome, "focus" | "lock" | "timeout") {
+            let failed = h.wait_for(Phase::Error).await.status;
+            assert!(failed.has_last);
+            let error = failed.error.unwrap();
+            assert!(error.contains(match outcome {
+                "focus" => "focused window changed",
+                "lock" => "desktop is locked",
+                _ => "keyboard stayed pressed for 5 seconds",
+            }));
+            assert!(!h.clipboard.exists());
+            assert_eq!(state.lock().unwrap().pastes, 0);
+            {
+                let mut state = state.lock().unwrap();
+                state.changed_focus = false;
+                state.locked = false;
+            }
+            // Retrying is asynchronous too: Cancel must interrupt a held-key wait.
+            let retry = h.call(Action::PasteLast).await;
+            assert!(retry.ok);
+            assert_eq!(retry.status.phase, Phase::Delivering);
+            assert!(retry.status.error.is_none());
+            assert_eq!(h.call(Action::Cancel).await.status.phase, Phase::Idle);
+            state.lock().unwrap().held = false;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!h.clipboard.exists());
+            assert_eq!(state.lock().unwrap().pastes, 0);
+            assert!(h.call(Action::PasteLast).await.ok);
+        }
+        let done = h.wait_for(Phase::Idle).await.status;
+        assert!(done.error.is_none());
+        if outcome == "cancel" {
+            assert!(!h.clipboard.exists());
+            assert_eq!(state.lock().unwrap().pastes, 0);
+        } else {
+            assert_eq!(
+                fs::read_to_string(&h.clipboard).unwrap(),
+                "retained transcript"
+            );
+            assert_eq!(state.lock().unwrap().pastes, 1);
+        }
+        server.await.unwrap();
+        compositor.abort();
+    }
+}
+
+#[tokio::test]
 async fn automatic_submission_on_duration_and_silence() {
     for silence in [false, true] {
         let (endpoint, server) =

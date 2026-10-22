@@ -44,6 +44,18 @@ fn wav_has_correct_rate_and_clamps_samples() {
     assert!((audio::rms(&[0.5, -0.5]) - 0.5).abs() < 0.001);
 }
 #[test]
+fn audible_input_survives_leading_and_trailing_silence() {
+    let mut samples = vec![0.0; audio::RATE * 5];
+    assert!(!audio::has_signal(&samples, 0.008));
+    // A short click is not sufficient input for recognition.
+    samples[audio::RATE..audio::RATE + 80].fill(0.5);
+    assert!(!audio::has_signal(&samples, 0.008));
+    samples.fill(0.0);
+    samples[audio::RATE..audio::RATE + 4800].fill(0.012);
+    assert!(audio::rms(&samples) < 0.008);
+    assert!(audio::has_signal(&samples, 0.008));
+}
+#[test]
 fn wav_rejects_wrong_sample_rate_and_nonfinite_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.wav");

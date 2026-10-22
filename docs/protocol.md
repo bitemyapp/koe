@@ -31,6 +31,10 @@ asynchronous capture, inference, or delivery failure appears in
 `status.phase = "error"` and `status.error`; a successful `status` request
 still has `ok:true`. `stop` returns after submitting recognition, not after
 transcription or paste completes. Use the stream to observe completion.
+`paste-last` also acknowledges submission: it enters `delivering`, then `idle`
+or `error`. It is accepted only while idle or in error and can be cancelled.
+On Aizome, delivery waits up to five seconds for held keys to be released,
+checking focus and lock state throughout the wait.
 
 The `last` response adds a `text` string. Other responses and all subscription
 updates omit it. `clear-last` does not clear the desktop clipboard. `cancel`

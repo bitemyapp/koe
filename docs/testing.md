@@ -37,6 +37,9 @@ opens foot, sends Super+Alt+D twice through the real compositor, and verifies th
 recognized text arrives in that terminal through the real Wayland clipboard.
 It enables kitty keyboard reporting and bracketed paste, disables compositor
 command-key translation, and checks bracketed text arrives without Ctrl+V.
+It repeats the dictation with the stop shortcut held down until recognition
+finishes, checks that nothing is pasted while held, then releases the keys and
+checks delivery. This covers fast GPU recognition overtaking human key release.
 It uses fixture speech, its own sockets, private configuration and no session
 bus; it never uses the login session's microphone, clipboard, or keyboard.
 It requires `aizome`, `foot`, and `wl-copy` on PATH:
@@ -50,6 +53,8 @@ KOE_TEST_WAV=/tmp/koe-smoke/jfk.wav \
 The ordinary daemon suite separately checks that the second toggle immediately
 announces transcription, that another toggle during recognition reports the
 microphone is off, and that none of these notifications contains speech.
+It also covers held-key release, cancellation, focus changes, locking, timeout,
+and retrying a retained transcript without blocking daemon controls.
 
 The tray integration test starts a private `dbus-daemon` and StatusNotifierWatcher,
 then invokes real DBusMenu actions. It checks registration, phase updates,

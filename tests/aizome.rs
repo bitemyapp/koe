@@ -230,7 +230,9 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let status = ipc::request(&socket, &Request::new(Action::Status)).await?;
-                if status.status.phase == Phase::Recording && status.status.elapsed_ms > 1000 {
+                if status.status.phase == Phase::Recording
+                    && status.status.elapsed_ms >= (samples.len() * 1000 / koe::audio::RATE) as u64
+                {
                     break Ok::<_, anyhow::Error>(());
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -238,10 +240,67 @@ async fn two_real_aizome_shortcuts_recognize_and_paste_into_foot() -> Result<()>
         })
         .await??;
         let stopped = std::time::Instant::now();
+        let before = fs::read(&captured_text)?;
+        // Unlike a synthetic chord, real people do not release all three keys
+        // instantly. Keep them down through recognition on the second attempt.
+        let stop_event = if attempt == 2 {
+            json!({"request":"synthesize","events":[
+                {"type":"key","key":"super","pressed":true},
+                {"type":"key","key":"alt","pressed":true},
+                {"type":"key","key":"d","pressed":true}
+            ]})
+        } else {
+            chord
+        };
         ensure!(
-            compositor(&comp_socket, chord).await?["response"] == "ok",
+            compositor(&comp_socket, stop_event).await?["response"] == "ok",
             "second chord rejected"
         );
+        if attempt == 2 {
+            tokio::time::timeout(Duration::from_secs(40), async {
+                loop {
+                    let status = ipc::request(&socket, &Request::new(Action::Status))
+                        .await?
+                        .status;
+                    ensure!(
+                        status.phase != Phase::Error,
+                        "held-key dictation failed: {:?}",
+                        status.error
+                    );
+                    if status.phase == Phase::Delivering {
+                        break Ok::<_, anyhow::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await??;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ensure!(
+                ipc::request(&socket, &Request::new(Action::Status))
+                    .await?
+                    .status
+                    .phase
+                    == Phase::Delivering,
+                "did not wait for shortcut release"
+            );
+            ensure!(
+                fs::read(&captured_text)? == before,
+                "pasted before shortcut release"
+            );
+            ensure!(
+                compositor(
+                    &comp_socket,
+                    json!({"request":"synthesize","events":[
+                        {"type":"key","key":"d","pressed":false},
+                        {"type":"key","key":"alt","pressed":false},
+                        {"type":"key","key":"super","pressed":false}
+                    ]})
+                )
+                .await?["response"]
+                    == "ok",
+                "key release rejected"
+            );
+        }
         tokio::time::timeout(Duration::from_secs(40), async {
             loop {
                 let status = ipc::request(&socket, &Request::new(Action::Status)).await?;

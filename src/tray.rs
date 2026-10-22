@@ -23,7 +23,7 @@ impl Tray {
             Phase::Finishing => "Stopping microphone",
             Phase::Transcribing => "Transcribing",
             Phase::Delivering => "Pasting",
-            Phase::Error => "Needs attention",
+            Phase::Error => "Microphone off — needs attention",
         }
     }
     fn item(&self, label: &str, action: Action, enabled: bool) -> ksni::MenuItem<Self> {
@@ -63,7 +63,7 @@ impl ksni::Tray for Tray {
         vec![icon(Phase::Error)]
     }
     fn tool_tip(&self) -> ksni::ToolTip {
-        let description = self
+        let mut description = self
             .error
             .as_ref()
             .or(self.status.error.as_ref())
@@ -71,11 +71,17 @@ impl ksni::Tray for Tray {
             .unwrap_or_else(|| match self.status.phase {
                 Phase::Recording => "Microphone on. Stop dictation to transcribe.".into(),
                 Phase::Paused => "Microphone off. Resume or stop dictation.".into(),
-                Phase::Finishing | Phase::Transcribing | Phase::Delivering => {
-                    "Finishing dictation. You can cancel from the menu.".into()
+                Phase::Finishing => "Stopping microphone. You can cancel from the menu.".into(),
+                Phase::Transcribing | Phase::Delivering => {
+                    "Microphone off. Finishing dictation. You can cancel from the menu.".into()
                 }
                 _ => "Super+Alt+D to dictate. Click for controls.".into(),
             });
+        if self.status.phase != Phase::Recording
+            && (self.error.is_some() || self.status.error.is_some())
+        {
+            description = format!("Microphone off. {description}");
+        }
         ksni::ToolTip {
             title: self.title(),
             description,
@@ -116,7 +122,15 @@ impl ksni::Tray for Tray {
                 },
                 recording,
             ),
-            self.item("Cancel dictation", Action::Cancel, !idle),
+            self.item(
+                if phase == Phase::Error {
+                    "Dismiss error"
+                } else {
+                    "Cancel dictation"
+                },
+                Action::Cancel,
+                phase != Phase::Idle,
+            ),
             ksni::MenuItem::Separator,
             self.item(
                 "Copy last transcript",
@@ -140,14 +154,14 @@ impl ksni::Tray for Tray {
 }
 
 // Embed a small, crisp microphone as SNI's network-order ARGB pixels, so tray
-// hosts do not need an installed icon theme. Recording is red, busy amber,
-// paused blue, errors orange, and idle cream. No raster asset dependency.
+// hosts do not need an installed icon theme. Recording is red, busy amber dots,
+// paused blue, errors an amber warning triangle, and idle cream.
 fn icon(phase: Phase) -> ksni::Icon {
     let color = match phase {
         Phase::Recording => [240, 90, 90],
         Phase::Paused => [117, 177, 229],
         Phase::Finishing | Phase::Transcribing | Phase::Delivering => [232, 177, 91],
-        Phase::Error => [255, 135, 75],
+        Phase::Error => [232, 177, 91],
         Phase::Idle => [242, 237, 227],
     };
     let mut argb = vec![0; 32 * 32 * 4];
@@ -162,7 +176,19 @@ fn icon(phase: Phase) -> ksni::Icon {
                 && (49..=64).contains(&((x - 16).pow(2) + (y - 15).pow(2)));
             let stem = (15..18).contains(&x) && (22..27).contains(&y);
             let foot = (11..22).contains(&x) && (26..28).contains(&y);
-            if capsule || ring || stem || foot {
+            let warning = (5..28).contains(&y)
+                && ((y - 5 - 2 * (x - 16).abs()).abs() <= 2 || y >= 25 && (4..29).contains(&x));
+            let exclamation =
+                (15..18).contains(&x) && ((12..20).contains(&y) || (22..24).contains(&y));
+            let dots = [6, 16, 26]
+                .iter()
+                .any(|cx| (x - cx).pow(2) + (y - 16).pow(2) <= 9);
+            let marked = match phase {
+                Phase::Error => warning || exclamation,
+                Phase::Finishing | Phase::Transcribing | Phase::Delivering => dots,
+                _ => capsule || ring || stem || foot,
+            };
+            if marked {
                 let offset = ((y * 32 + x) * 4) as usize;
                 argb[offset..offset + 4].copy_from_slice(&[255, color[0], color[1], color[2]]);
             }
@@ -260,5 +286,21 @@ mod tests {
         assert!(!start.enabled && cancel.enabled);
         assert_ne!(icon(Phase::Idle).data, icon(Phase::Recording).data);
         assert_eq!(tray.icon_pixmap()[0].data.len(), 32 * 32 * 4);
+        tray.status.phase = Phase::Error;
+        tray.status.error = Some("focused window changed".into());
+        assert!(tray.title().contains("Microphone off"));
+        assert!(tray.tool_tip().description.starts_with("Microphone off."));
+        let mut menu = tray.menu();
+        let ksni::MenuItem::Standard(dismiss) = &mut menu[4] else {
+            panic!()
+        };
+        assert!(dismiss.enabled);
+        assert_eq!(dismiss.label, "Dismiss error");
+        (dismiss.activate)(&mut tray);
+        assert_eq!(commands.recv().await, Some(Action::Cancel));
+        // Distinguish shapes, not just colors, at small tray sizes.
+        let silhouette = |phase| icon(phase).data.chunks(4).map(|p| p[0]).collect::<Vec<_>>();
+        assert_ne!(silhouette(Phase::Recording), silhouette(Phase::Error));
+        assert_ne!(silhouette(Phase::Recording), silhouette(Phase::Delivering));
     }
 }

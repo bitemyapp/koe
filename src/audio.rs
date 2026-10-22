@@ -50,6 +50,18 @@ pub fn rms(samples: &[f32]) -> f32 {
         as f32
 }
 
+/// Require 100 ms of audible input, measured in 20 ms windows. Averaging
+/// the entire recording lets quiet lead-in/trailing pauses erase real speech.
+/// This is an amplitude gate, not a speech classifier.
+pub fn has_signal(samples: &[f32], threshold: f32) -> bool {
+    samples
+        .chunks(RATE / 50)
+        .filter(|chunk| rms(chunk) >= threshold)
+        .map(<[f32]>::len)
+        .sum::<usize>()
+        >= RATE / 10
+}
+
 pub struct Capture {
     pub stop: oneshot::Sender<()>,
     pub task: tokio::task::JoinHandle<Result<Vec<f32>>>,

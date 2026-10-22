@@ -156,8 +156,10 @@ language detection if you only dictate in that language.
 
 The daemon appears in Aizome's system tray automatically. Click the microphone
 to open its menu: start/stop, pause/resume, cancel, copy/forget the last transcript,
-unload the model, or quit. Red means listening; blue means paused; amber means
-processing. An error changes the icon and tooltip. Opening the menu does not
+unload the model, or quit. A red microphone means listening; blue means paused;
+amber dots mean processing. An error shows a warning triangle and a tooltip
+confirming the microphone is off; choose **Dismiss error** to clear it.
+Opening the menu does not
 start recording. The tray reconnects when the shell restarts.
 
 Launch **Koe Dictation** from the app launcher, or run `koe launch`, to start the
@@ -187,6 +189,12 @@ recording. Pressing toggle while transcription is running shows a reminder;
 `cancel` discards it. The daemon logs state transitions and failures to its
 terminal or journal, without logging recognized text. Failure notifications
 include the reason, such as a changed focus or unavailable clipboard.
+
+If recognition finishes while the stop shortcut is still held, Koe waits for
+the keys to be released before pasting. The microphone stays off during this
+wait. Changing focus or locking cancels delivery; after five seconds of held
+keys, Koe retains the transcript and reports the timeout. `paste-last` retries
+delivery in the intended window, and `cancel` can interrupt either wait.
 
 Aizome's current binding configuration supports toggle actions; press/release
 push-to-talk requires a hotkey host that provides both edges. There is no

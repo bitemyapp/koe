@@ -94,7 +94,7 @@ impl State {
             "recording is too short"
         );
         ensure!(
-            audio::rms(&self.samples) >= self.config.audio.silence_threshold,
+            audio::has_signal(&self.samples, self.config.audio.silence_threshold),
             "no speech detected; check microphone level"
         );
         let samples = std::mem::take(&mut self.samples);
@@ -217,7 +217,11 @@ impl State {
                 desktop::copy(self.last.as_deref().context("no transcript in memory")?).await?
             }
             Action::PasteLast => {
-                let text = self.last.as_deref().context("no transcript in memory")?;
+                ensure!(
+                    matches!(self.status.phase, Phase::Idle | Phase::Error),
+                    "finish or cancel dictation before pasting the last transcript"
+                );
+                let text = self.last.clone().context("no transcript in memory")?;
                 let mut output = self.config.output.clone();
                 output.mode = OutputMode::Paste;
                 let target = if desktop::uses_aizome(&output) {
@@ -225,7 +229,11 @@ impl State {
                 } else {
                     None
                 };
-                desktop::deliver(text, &output, target).await?;
+                self.status.phase = Phase::Delivering;
+                self.status.error = None;
+                self.delivery = Some(tokio::spawn(async move {
+                    desktop::deliver(&text, &output, target).await
+                }));
             }
             Action::ClearLast => self.last = None,
             Action::Unload => {
