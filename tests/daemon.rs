@@ -145,6 +145,23 @@ impl Harness {
     fn vocabulary_root(&self) -> PathBuf {
         self._dir.path().join("data/aizome/koe/vocabulary")
     }
+    /// Run a `koe` command against this daemon's data, as a script would.
+    #[cfg(feature = "ui")]
+    fn koe(&self, args: &[&str]) -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_koe"))
+            .arg("--config")
+            .arg(&self.config)
+            .args(args)
+            .env("XDG_DATA_HOME", self._dir.path().join("data"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
     async fn wait_for(&self, phase: Phase) -> Response {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -481,6 +498,108 @@ async fn native_window_records_reviews_saves_and_exports() {
     );
     assert!(!h.clipboard.exists());
     server.await.unwrap();
+}
+/// The vocabulary window once its library and the selected word's
+/// examples have arrived. Moving the pointer where nothing reacts to it
+/// delivers worker replies without other input.
+#[cfg(feature = "ui")]
+async fn loaded_window(socket: &Path) -> aizome_kit::testing::Harness<koe::ui::VocabularyWindow> {
+    use aizome_kit::{prelude::*, testing::Harness as Window};
+    let mut ui = Window::new(koe::ui::VocabularyWindow::new(socket.into()));
+    let window = ui.window();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ui
+            .inspected(window)
+            .iter()
+            .any(|node| node["text"] == "Record example" && node["disabled"] != true)
+        {
+            ui.move_to(window, Point::new(950.0, 735.0));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the vocabulary never loaded");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ui.move_to(window, Point::new(950.0, 735.0));
+    ui
+}
+#[cfg(feature = "ui")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_window_polls_without_disabling_or_repainting() {
+    use aizome_kit::prelude::*;
+    let h = Harness::start("http://127.0.0.1:9/inference".into(), None).await;
+    let mut ui = loaded_window(&h.socket).await;
+    let window = ui.window();
+    let shown = ui.inspected(window);
+    ui.take_damage(window);
+    // Status every tick; the library and the word's examples every three seconds.
+    for _ in 0..12 {
+        ui.advance(Duration::from_millis(500));
+        assert_eq!(
+            ui.inspected(window),
+            shown,
+            "a read in flight changed the window"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        ui.move_to(window, Point::new(950.0, 735.0));
+        assert_eq!(
+            ui.inspected(window),
+            shown,
+            "an unchanged reply changed the window"
+        );
+    }
+    assert_eq!(ui.take_damage(window), vec![]);
+}
+#[cfg(feature = "ui")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_window_shows_command_line_changes_and_keeps_typing() {
+    use aizome_kit::{
+        prelude::*,
+        sidestep_ui::{Key, Modifiers},
+    };
+    let h = Harness::start("http://127.0.0.1:9/inference".into(), None).await;
+    let mut ui = loaded_window(&h.socket).await;
+    let window = ui.window();
+    // An unsaved edit in progress…
+    let field = ui.find_id(window, "pack-description").unwrap();
+    ui.click(window, field.center());
+    ui.key(window, Key::Character("a".into()), Modifiers::SUPER);
+    ui.type_text(window, "Desktop names");
+    // …while an agent adds a word.
+    let word = h.koe(&["words", "add", "sekka", "Fusen", "--alias", "who sen"]);
+    assert_eq!(word["id"], "fusen");
+    for _ in 0..8 {
+        ui.advance(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        ui.move_to(window, Point::new(950.0, 735.0));
+        if ui.find_id(window, "word:fusen").is_some() {
+            break;
+        }
+    }
+    assert!(ui.find_id(window, "word:fusen").is_some());
+    assert!(
+        ui.texts(window)
+            .iter()
+            .any(|t| t.contains("changed outside this window"))
+    );
+    let description = ui
+        .inspected(window)
+        .into_iter()
+        .find(|node| node["name"] == "pack-description")
+        .unwrap();
+    assert_eq!(description["text"], "Desktop names");
+    // Saving builds on the agent's change rather than failing as stale.
+    assert!(ui.click_text(window, "Save pack"));
+    let store = koe::vocabulary::Store::new(h.vocabulary_root());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.load().unwrap().packs[1].description != "Desktop names" {
+            ui.move_to(window, Point::new(950.0, 735.0));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(store.load().unwrap().word("sekka", "fusen").is_ok());
 }
 #[tokio::test]
 async fn complete_dictation_pause_resume_last_and_shutdown() {

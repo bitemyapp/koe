@@ -19,7 +19,14 @@ rustPlatform.buildRustPackage {
   dontUseCmakeConfigure = true;
   # The supplied bindings omit Vulkan device functions; regenerate for GPU builds.
   WHISPER_DONT_GENERATE_BINDINGS = "1";
-  preBuild = lib.optionalString vulkanSupport "unset WHISPER_DONT_GENERATE_BINDINGS";
+  # ggml's shader generator starts a thread per shader variant (over a thousand),
+  # each with a stack the size of the soft stack limit. Under nix-daemon's 64 MiB
+  # limit, its glslc forks fail on a loaded machine and the missing shaders only
+  # show up as undefined symbols at link time; the default 8 MiB is plenty.
+  preBuild = lib.optionalString vulkanSupport ''
+    unset WHISPER_DONT_GENERATE_BINDINGS
+    ulimit -Ss 8192
+  '';
   GGML_NATIVE = "OFF";
   GGML_AVX = "OFF";
   GGML_AVX2 = "OFF";

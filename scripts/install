@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Install from this checkout, even when the profile originally used another
+# worktree or a remote flake. Nix keeps the previous profile generation.
+set -euo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+checkout=$PWD
+service=aizome-koe.service
+
+entries=$(nix profile list --json | jq -c '
+  [.elements | to_entries[]
+   | select((.value.attrPath // "" | split(".") | last) as $package
+            | $package == "koe" or $package == "koe-vulkan"
+              or any(.value.storePaths[]; test("/[^/]+-aizome-koe-")))]')
+count=$(jq 'length' <<< "$entries")
+if (( count > 1 )); then
+  echo "More than one Koe profile entry found; keep one before reinstalling." >&2
+  exit 1
+fi
+
+package=${1:-auto}
+priority=4
+if (( count == 1 )); then
+  name=$(jq -r '.[0].key' <<< "$entries")
+  priority=$(jq -r '.[0].value.priority // 5' <<< "$entries")
+  if [[ $package == auto ]]; then
+    package=$(jq -r '(.[0].value.attrPath // "") | split(".") | last' <<< "$entries")
+    case "$package" in
+      koe|koe-vulkan) ;;
+      default) package=koe ;;
+      *) echo "Cannot determine the installed variant. Run just install koe or just install koe-vulkan." >&2; exit 1 ;;
+    esac
+  fi
+fi
+[[ $package != auto ]] || package=koe
+case "$package" in
+  koe|koe-vulkan) ;;
+  *) echo "Expected auto, koe or koe-vulkan, got: $package" >&2; exit 1 ;;
+esac
+
+echo "Building $package from $checkout"
+nix build ".#$package" --cores 4 --max-jobs 1
+binary="$checkout/result/bin/koe"
+
+check_idle() {
+  # A live service with an unreadable status must not be restarted either.
+  status=$("$binary" status)
+  if ! jq -e '.ok == true and .status.phase == "idle" and .status.teaching == false' \
+      <<< "$status" >/dev/null; then
+    echo "Koe is busy. Finish dictation or save/discard the teaching example, then retry." >&2
+    exit 1
+  fi
+}
+
+# Check after the build: the user may have started dictating while it ran.
+restart=false
+if systemctl --user is-active --quiet "$service"; then
+  check_idle
+  restart=true
+  if jq -e '.status.has_last == true' <<< "$status" >/dev/null; then
+    echo "Restarting Koe clears the last transcript held in memory." >&2
+  fi
+fi
+
+# Re-add the local flake rather than upgrading the old origin: that origin may
+# be a remote URL, a pinned revision, or a completely different worktree.
+restore_profile=false
+restore_on_failure() {
+  if "$restore_profile"; then
+    echo "Installation failed; restoring the previous profile generation." >&2
+    nix profile rollback
+  fi
+}
+trap restore_on_failure EXIT
+if (( count == 1 )); then
+  nix profile remove "$name"
+  restore_profile=true
+fi
+nix profile install ".#$package" --priority "$priority" --cores 4 --max-jobs 1
+restore_profile=false
+trap - EXIT
+
+installed=$(readlink -f -- "$checkout/result")
+nix profile list --json | jq -e --arg installed "$installed" \
+  'any(.elements[]; .active and (.storePaths | index($installed) != null))' >/dev/null || {
+    echo "The profile did not select the built package; leaving the running daemon alone." >&2
+    echo "The source may have changed during installation; run the command again." >&2
+    exit 1
+  }
+
+systemctl --user daemon-reload
+if "$restart"; then
+  # A NixOS module or a user override can pin ExecStart to another package.
+  # Do not claim to replace that service by changing the user profile alone.
+  exec_start=$(systemctl --user show "$service" --property=ExecStart --value)
+  if [[ $exec_start != *"$installed/bin/koe"* ]]; then
+    echo "Package installed, but $service uses a different executable." >&2
+    echo "Update its ExecStart (or programs.aizome.koe.package) to $installed/bin/koe and restart it." >&2
+    exit 1
+  fi
+  check_idle
+  systemctl --user restart "$service"
+  echo "Installed $package and restarted $service."
+else
+  echo "Installed $package. Run koe launch to start it."
+fi

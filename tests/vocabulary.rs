@@ -198,3 +198,151 @@ fn invalid_examples_never_create_saved_audio() {
     );
     assert!(!dir.path().join("store/examples").exists());
 }
+
+/// What scripts and agents see: `koe` vocabulary commands print JSON and
+/// act on the store without a daemon.
+fn koe(dir: &std::path::Path, args: &[&str]) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_koe"))
+        .arg("--config")
+        .arg(dir.join("koe.toml"))
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_DATA_HOME", dir.join("data"))
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    if output.status.success() {
+        Ok(serde_json::from_slice(&output.stdout).unwrap())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into())
+    }
+}
+
+#[test]
+fn command_line_manages_packs_words_and_saved_examples() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let pack = koe(
+        dir,
+        &[
+            "packs",
+            "create",
+            "Desktop terms",
+            "--description",
+            "Team names",
+            "--enable",
+        ],
+    )
+    .unwrap();
+    assert_eq!(pack["id"], "desktop-terms");
+    assert_eq!(pack["enabled"], true);
+    let word = koe(
+        dir,
+        &[
+            "words",
+            "add",
+            "desktop-terms",
+            "Fusen",
+            "--alias",
+            "who sen",
+            "--alias",
+            "Fuzen",
+        ],
+    )
+    .unwrap();
+    assert_eq!(word["id"], "fusen");
+    assert_eq!(word["pack"], "desktop-terms");
+    // Packs go by name and words by spelling, ignoring case, as well as by ID.
+    assert!(
+        koe(dir, &["words", "add", "desktop terms", "fusen"])
+            .unwrap_err()
+            .contains("already has")
+    );
+    let word = koe(
+        dir,
+        &[
+            "words",
+            "edit",
+            "desktop-terms",
+            "FUSEN",
+            "--add-alias",
+            "Fyusen",
+            "--remove-alias",
+            "fuzen",
+        ],
+    )
+    .unwrap();
+    assert_eq!(word["aliases"], serde_json::json!(["who sen", "Fyusen"]));
+    assert!(
+        koe(
+            dir,
+            &[
+                "words",
+                "edit",
+                "desktop-terms",
+                "fusen",
+                "--remove-alias",
+                "nope"
+            ]
+        )
+        .is_err()
+    );
+    // Validation is the window's: an alias may not replace an active word.
+    assert!(
+        koe(dir, &["words", "add", "desktop-terms", "Isome"])
+            .unwrap_err()
+            .contains("would replace the active word")
+    );
+
+    let store = Store::new(dir.join("data/aizome/koe/vocabulary"));
+    let mut saved = example("taught");
+    saved.pack_id = "desktop-terms".into();
+    saved.word_id = "fusen".into();
+    saved.spelling = "Fusen".into();
+    saved.transcript = "Open Fusen.".into();
+    store.save_example(saved, &[0.1; 1600]).unwrap();
+    assert_eq!(
+        koe(dir, &["packs", "show", "Desktop terms"]).unwrap()["words"][0]["examples"],
+        1
+    );
+    let examples = koe(dir, &["examples", "list"]).unwrap();
+    assert_eq!(examples.as_array().unwrap().len(), 1);
+    assert_eq!(examples[0]["transcript"], "Open Fusen.");
+    assert_eq!(examples[0]["heard"], "Open Isome settings.");
+    let audio = std::path::PathBuf::from(examples[0]["audio"].as_str().unwrap());
+    use sha2::Digest;
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(fs::read(&audio).unwrap())),
+        examples[0]["audio_sha256"]
+    );
+    assert_eq!(
+        koe(dir, &["examples", "list", "sekka"]).unwrap(),
+        serde_json::json!([])
+    );
+    assert!(
+        koe(dir, &["words", "remove", "desktop-terms", "fusen"])
+            .unwrap_err()
+            .contains("delete the saved examples")
+    );
+    koe(dir, &["examples", "delete", "taught"]).unwrap();
+    assert!(!audio.exists());
+    assert!(koe(dir, &["examples", "delete", "taught"]).is_err());
+    koe(dir, &["words", "remove", "desktop-terms", "fusen"]).unwrap();
+
+    let pack = koe(dir, &["packs", "disable", "desktop-terms"]).unwrap();
+    assert_eq!(pack["enabled"], false);
+    let pack = koe(
+        dir,
+        &["packs", "edit", "desktop-terms", "--name", "Team terms"],
+    )
+    .unwrap();
+    assert_eq!(pack["name"], "Team terms");
+    koe(dir, &["packs", "export", "team terms", "team.koe.json"]).unwrap();
+    assert!(dir.join("team.koe.json").exists());
+    koe(dir, &["packs", "remove", "team terms"]).unwrap();
+    let library = koe(dir, &["packs", "list"]).unwrap();
+    assert_eq!(library["packs"].as_array().unwrap().len(), 2);
+    let imported = koe(dir, &["packs", "import", "team.koe.json"]).unwrap();
+    assert_eq!(imported["id"], "desktop-terms");
+    assert_eq!(imported["enabled"], false);
+}

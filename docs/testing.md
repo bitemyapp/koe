@@ -92,15 +92,21 @@ the real `pw-record` first on PATH, whereas this test supplies a fixture.
 
 Vocabulary tests check pack import/export, inactive imports, conflicting aliases,
 stale edits, bounded input, private permissions, WAV labels and checksums, deletion,
-and the separation of vocabulary from training exports. Daemon tests exercise
+and the separation of vocabulary from training exports. A command-line test runs
+the `koe packs`, `koe words` and `koe examples` commands scripts and agents use,
+without a daemon, and checks their JSON. Daemon tests exercise
 explicit save, discard, lease expiry, token ownership, next-dictation reload,
 and verify that teaching never writes the clipboard or ordinary last transcript.
 They also verify that ordinary dictation creates no saved training audio.
 
 The native Aizome Kit harness drives the real window against an isolated daemon:
 Record → Stop → edit the complete sentence → approve a correction → Save →
-export. The model server and microphone are fixtures. To render its ordinary and
-review states for inspection, set an existing output directory:
+export. The model server and microphone are fixtures. Two more window tests
+check that six seconds of polling leave every control as it was and repaint
+nothing (each poll used to disable about half the controls until its reply,
+which flickered), and that a word added by `koe words add` appears without
+discarding an unsaved edit, which then saves on top of it. To render its
+ordinary and review states for inspection, set an existing output directory:
 
 ```sh
 KOE_TEST_SCREENSHOTS=/tmp cargo test --test daemon native_window -- --nocapture

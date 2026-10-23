@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Just starts here in the directory containing the justfile. Preserve its
+# arguments so recipe parameters remain data when entering the development shell.
+set -euo pipefail
+
+if [[ -n ${IN_NIX_SHELL:-} ]]; then
+  exec bash "$@"
+fi
+
+exec nix develop --command bash "$@"

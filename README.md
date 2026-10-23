@@ -96,6 +96,32 @@ nix run github:bitemyapp/koe -- record toggle
 
 ## Build from source
 
+To rebuild and reinstall the current checkout or branch on Sekka / NixOS:
+
+```sh
+just install                       # just replace is an alias
+# If just is not on your PATH:
+nix develop -c just install
+```
+
+This updates Koe in your user Nix profile, preserving the installed CPU or
+Vulkan variant (a first install uses CPU). It builds before changing the profile,
+restores the previous profile if installation fails, then reloads and restarts
+an active `aizome-koe.service`. Pass `koe` or `koe-vulkan` to `just install` to
+choose a variant explicitly. It refuses to restart during dictation or teaching;
+finish or discard that work and run it again.
+Restarting clears the last transcript held in memory. An inactive service stays
+inactive; run `koe launch` to start it. Reopen any existing vocabulary window to
+use the updated interface. If a NixOS module or a user override pins
+the service to another package, update that configuration to use this checkout.
+
+Like Aizome's justfile, recipes enter `nix develop` automatically when needed.
+They use this checkout even if Koe was originally installed from another
+worktree or a remote flake. Nix includes changes to tracked files; add new source
+files with `git add` before building. `just build` only builds the CPU package;
+`just build koe-vulkan` builds the GPU package. Builds use four cores and one
+Nix build job.
+
 Linux, Rust 1.95+, a C/C++ toolchain and CMake are required. At runtime,
 install PipeWire's `pw-record`/`pw-play`, `wl-clipboard`, Fontconfig and Wayland.
 The default build includes the native Aizome Kit interface; `--no-default-features
@@ -267,14 +293,27 @@ explicit export of that pack's saved WAV recordings and complete transcripts
 to a new folder. Do not use that export when you intend to share vocabulary only.
 Delete saved examples from the window before removing their word or pack.
 
-The CLI offers the same pack operations:
+The command line does everything the window does except record, so scripts
+and agents can manage vocabulary and review training data. Every command prints
+JSON, works whether or not the daemon is running, and takes a pack's ID or name
+and a word's ID or spelling. An open window shows their changes within three
+seconds, keeping anything you were typing:
 
 ```sh
-koe packs list
+koe packs list                                   # the whole library
+koe packs show sekka                             # one pack, with example counts
+koe packs create "Desktop terms" --enable        # ID: desktop-terms
+koe packs edit desktop-terms --description "Team names"
+koe words add desktop-terms Fusen --alias "who sen"
+koe words edit sekka Aizome --add-alias Aizoma --remove-alias IZOMA
+koe words remove desktop-terms Fusen
+koe examples list sekka --word Aizome            # transcripts, raw recognition, WAV paths
+koe examples delete EXAMPLE_ID
 koe packs export sekka ~/sekka.koe.json
 koe packs import ~/my-domain.koe.json
 koe packs enable PACK_ID
 koe packs disable PACK_ID
+koe packs remove PACK_ID
 koe packs export-examples sekka ~/sekka-training
 ```
 
